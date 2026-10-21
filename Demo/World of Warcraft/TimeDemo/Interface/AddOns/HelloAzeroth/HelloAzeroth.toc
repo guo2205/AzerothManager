@@ -1,0 +1,7 @@
+## Interface: 000000
+## Title: Hello Azeroth
+## Title-zhCN: 艾泽拉斯，你好
+## Notes-zhCN: 仅供测试扫描与安装流程，不代表真实客户端兼容性。
+## Author: 本地演示
+## Version: 1.0.0
+main.lua
