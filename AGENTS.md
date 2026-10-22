@@ -13,3 +13,5 @@ The user explicitly requests that every completed code update be committed and p
 - This repository is public. Never commit API keys, credentials, personal application forms, local game data, backups, build caches, or private contact details. Check newly added files before publishing.
 - If tests or the push fail, explain what remains unsynchronized. Do not claim synchronization succeeded.
 - GitHub synchronization does not update files uploaded to ChatGPT Projects automatically.
+
+- Preview only the newest built application. Close older AzerothManager instances and remove obsolete project-generated app bundles and versioned distribution ZIPs after the latest build passes validation. Preserve game files, user settings, and backups. Use `scripts/run-latest.sh` for this workflow.

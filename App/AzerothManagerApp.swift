@@ -67,6 +67,17 @@ struct Prompt: Identifiable {
             }
         }
     }
+    @Published var useDD = true { didSet { if useDD != oldValue { installedUpdates = [:] } } }
+    @Published var ddQuery = ""
+    @Published var ddPage: DDPage?
+    @Published var ddPageNumber = 1
+    func searchDD(page: Int = 1) {
+        let query = ddQuery, type = DDClient.gameType(flavor)
+        runNetwork("正在查询 DD 插件库…", operation: { try await DDClient().search(query, gameType: type, page: page) }) { result in
+            self.ddPage = result; self.ddPageNumber = page
+            self.status = "DD 查询完成 · 下载请使用 DD 官方页面"
+        }
+    }
     @Published var apiKeyInput = ""
     @Published var keyStatus = "密钥保存在本机钥匙串"
     @Published var cfQuery = ""
@@ -91,6 +102,7 @@ struct Prompt: Identifiable {
         } catch { self.error = error.localizedDescription }
     }
     func ensureOnline() {
+        guard !useDD else { return }
         if cfPage == nil && !busy { bootstrap() }
     }
     func bootstrap() {
@@ -127,7 +139,19 @@ struct Prompt: Identifiable {
         } catch { self.error = error.localizedDescription }
     }
     func checkInstalledUpdates() {
-        guard let target, !addons.isEmpty else { status = "已加载热门插件；选择游戏目录后可安装"; return }
+        guard !busy else { return }
+        guard let target, !addons.isEmpty else { status = "选择游戏目录后可检查更新"; return }
+        if useDD {
+            let addons = addons, flavor = flavor
+            installedUpdates = Dictionary(uniqueKeysWithValues: addons.map { ($0.folder, InstalledUpdate(label: "检查中…")) })
+            runNetwork("正在通过 DD 检查版本…", operation: { try await DDClient().check(target: target, addons: addons, flavor: flavor) }) { result in
+                guard self.target == target, self.flavor == flavor, self.useDD else { return }
+                self.installedUpdates = result
+                let matched = result.values.filter { $0.externalURL != nil }.count
+                self.status = "DD 检查完成 · 精确匹配 \(matched) 个文件夹 · 版本不同不代表一定较新，更新请前往 DD"
+            }
+            return
+        }
         guard cfTypeID > 0 else { bootstrap(); return }
         do {
             let client = try cfClient(), addons = addons, records = cfReceipts, type = cfTypeID, flavor = flavor
@@ -217,7 +241,7 @@ struct Prompt: Identifiable {
             self.addons = value.0; self.snapshots = value.1; self.cfReceipts = value.2; self.installedUpdates = [:]
             self.selected.formIntersection(Set(value.0.map(\.folder)))
             self.status = "已扫描 \(value.0.count) 个插件 · \(Date().formatted(date: .omitted, time: .shortened))"
-            if self.cfTypes.isEmpty { self.bootstrap() } else { self.checkInstalledUpdates() }
+            if self.useDD { self.checkInstalledUpdates() } else if self.cfTypes.isEmpty { self.bootstrap() } else { self.checkInstalledUpdates() }
         }
     }
     func chooseDirectory() {
@@ -306,7 +330,7 @@ struct ContentView: View {
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
                     Label("本地 + 在线来源", systemImage: "internaldrive").foregroundStyle(gold)
-                    Text("自动检查已安装插件\n一键更新，先备份。").font(.caption).foregroundStyle(.secondary)
+                    Text(model.useDD ? "DD 实时查询版本\n国服插件，也能找到。" : "自动检查已安装插件\n一键更新，先备份。").font(.caption).foregroundStyle(.secondary)
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }.padding(22).frame(width: 205).background(Color(red: 0.065, green: 0.075, blue: 0.09))
             Divider()
@@ -322,7 +346,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.4.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.5.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -369,7 +393,7 @@ struct ContentView: View {
                 Spacer()
                 Picker("客户端", selection: $model.flavor) { ForEach(Flavor.allCases) { Text($0.rawValue).tag($0) } }.labelsHidden().frame(width: 145)
                     .onChange(of: model.flavor) { _, value in
-                        model.cfTypes = []; model.cfTypeID = 0; model.installedUpdates = [:]; UserDefaults.standard.set(value.rawValue, forKey: "flavor"); model.refresh() }
+                        model.ddPage = nil; model.cfTypes = []; model.cfTypeID = 0; model.installedUpdates = [:]; UserDefaults.standard.set(value.rawValue, forKey: "flavor"); model.refresh() }
             }.padding(16).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
         }
     }
@@ -379,7 +403,11 @@ struct ContentView: View {
                 Text("\(model.addons.count)").font(.title.bold()).foregroundStyle(gold)
                 Text("个本地插件").foregroundStyle(.secondary)
                 Spacer()
-                Button("检查更新", systemImage: "arrow.down.circle", action: model.checkInstalledUpdates)
+                Button(action: model.checkInstalledUpdates) {
+                    Label("检查更新", systemImage: "arrow.triangle.2.circlepath").font(.system(size: 12, weight: .semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(gold.opacity(0.14), in: Capsule()).overlay(Capsule().stroke(gold.opacity(0.3), lineWidth: 1)).foregroundStyle(gold)
+                }.buttonStyle(.plain)
                 Button("重新扫描", systemImage: "arrow.clockwise", action: model.refresh)
                 Button(action: model.importZIP) {
                     Label("导入 ZIP", systemImage: "plus")
@@ -387,7 +415,13 @@ struct ContentView: View {
                         .background(gold, in: RoundedRectangle(cornerRadius: 6))
                 }.buttonStyle(.plain)
             }.disabled(model.target == nil)
-            branchPicker
+            HStack {
+                Picker("更新渠道", selection: $model.useDD) { Text("网易 DD").tag(true); Text("CurseForge").tag(false) }
+                    .pickerStyle(.segmented).frame(width: 260)
+                    .onChange(of: model.useDD) { _, _ in model.installedUpdates = [:]; model.checkInstalledUpdates() }
+                if model.useDD { Text("实时比对 DD 版本 · 无需 API Key").font(.caption).foregroundStyle(.secondary) }
+                else { branchPicker }
+            }
             HStack {
                 TextField("搜索名称、文件夹或作者", text: $model.search).textFieldStyle(.roundedBorder).frame(maxWidth: 350)
                 Spacer()
@@ -416,7 +450,17 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.installedUpdates[addon.folder]?.label ?? "等待检查").font(.caption).lineLimit(2)
                             if model.installedUpdates[addon.folder]?.selection != nil {
-                                Button("更新", systemImage: "arrow.down.circle") { model.updateInstalled(addon) }
+                                Button { model.updateInstalled(addon) } label: {
+                                    Label("更新", systemImage: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
+                                        .padding(.horizontal, 12).padding(.vertical, 5).foregroundStyle(.black)
+                                        .background(gold.gradient, in: Capsule())
+                                }.buttonStyle(.plain)
+                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.label != "版本号一致 · DD" {
+                                Link(destination: url) {
+                                    Label("前往 DD", systemImage: "arrow.up.right").font(.system(size: 11, weight: .semibold))
+                                        .padding(.horizontal, 11).padding(.vertical, 5).foregroundStyle(gold)
+                                        .background(gold.opacity(0.12), in: Capsule())
+                                }
                             }
                         }.padding(.vertical, 4)
                     }.width(min: 140, ideal: 180)
@@ -428,7 +472,7 @@ struct ContentView: View {
                     }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
-            Label("自动识别并检查已安装插件；点击更新将备份并替换整个插件包。未识别来源不会被标记为最新。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            Label(model.useDD ? "DD 实时版本查询；公开接口未提供下载地址，请前往 DD 更新。版本号一致不代表代码完全一致。" : "自动识别并检查已安装插件；点击更新将备份并替换整个插件包。未识别来源不会被标记为最新。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var backupView: some View {
@@ -463,6 +507,47 @@ struct ContentView: View {
         }
     }
     private var onlineView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("插件平台", selection: $model.useDD) { Text("网易 DD").tag(true); Text("CurseForge").tag(false) }.pickerStyle(.segmented).frame(width: 260)
+            if model.useDD { ddOnlineView } else { cfOnlineView }
+        }
+    }
+    private var ddOnlineView: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("探索 DD 插件库").font(.title2.bold())
+            Text("查询所选客户端的实时版本。DD 公开接口没有提供下载地址，安装与更新请通过官方页面完成。").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("搜索 DD 插件", text: $model.ddQuery).textFieldStyle(.roundedBorder).onSubmit { model.searchDD() }
+                Button("搜索") { model.searchDD() }
+            }
+            if let page = model.ddPage {
+                HStack {
+                    Text("共 \(page.count ?? 0) 个结果").foregroundStyle(.secondary)
+                    Spacer()
+                    Button("上一页") { model.searchDD(page: model.ddPageNumber - 1) }.disabled(model.ddPageNumber <= 1)
+                    Text("第 \(model.ddPageNumber) 页").font(.caption)
+                    Button("下一页") { model.searchDD(page: model.ddPageNumber + 1) }.disabled(model.ddPageNumber * 20 >= (page.count ?? 0))
+                }
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(page.result ?? []) { item in
+                            HStack(spacing: 16) {
+                                Image(systemName: "puzzlepiece.extension.fill").font(.title2).foregroundStyle(gold).frame(width: 36)
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(item.name).font(.headline)
+                                    Text(item.description ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    Text("DD 版本：" + (item.latest_version?.version ?? "未知")).font(.caption).foregroundStyle(gold)
+                                }
+                                Spacer()
+                                Link("前往 DD ↗", destination: item.website(gameType: DDClient.gameType(model.flavor))).font(.callout.weight(.semibold)).foregroundStyle(gold)
+                            }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+            } else { ContentUnavailableView("搜索 DD 插件库", systemImage: "magnifyingglass", description: Text("无需配置 API Key")) }
+        }.onAppear { if model.ddPage == nil && !model.busy { model.searchDD() } }
+    }
+    private var cfOnlineView: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("发现插件").font(.title2.bold())
@@ -513,8 +598,8 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.4", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
-                Text("插件库自动检查已安装插件，显示最新状态和更新按钮。在线安装默认展示 CurseForge 热门插件。GitHub 安装来源已移除。")
+                Label("艾泽拉斯插件管家 · v0.5", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Text("默认通过网易 DD 实时查询版本，无需密钥。公开接口暂不提供下载地址，安装和更新请前往 DD；也可切换 CurseForge 使用应用内更新。")
                 GroupBox("CurseForge 连接") {
                     VStack(alignment: .leading, spacing: 12) {
                         SecureField("API Key", text: $model.apiKeyInput).textFieldStyle(.roundedBorder)

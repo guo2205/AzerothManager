@@ -70,12 +70,13 @@ public enum CFFingerprint {
 public struct InstalledUpdate: Sendable {
     public let label: String
     public let latest: String?
+    public let externalURL: URL?
     public let sourceID: Int?
     public let selection: CFSelection?
     /// Snapshots of every existing folder in the package; rechecked immediately before mutation.
     public let expected: [String: String]
-    public init(label: String, latest: String? = nil, sourceID: Int? = nil, selection: CFSelection? = nil, expected: [String: String] = [:]) {
-        self.label = label; self.latest = latest; self.sourceID = sourceID; self.selection = selection; self.expected = expected
+    public init(label: String, latest: String? = nil, sourceID: Int? = nil, selection: CFSelection? = nil, expected: [String: String] = [:], externalURL: URL? = nil) {
+        self.externalURL = externalURL; self.label = label; self.latest = latest; self.sourceID = sourceID; self.selection = selection; self.expected = expected
     }
 }
 
