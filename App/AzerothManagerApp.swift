@@ -43,20 +43,9 @@ struct Prompt: Identifiable {
     @Published var candidates: [URL] = []
     @Published var showCandidates = false
     @Published var prompt: Prompt?
-    @Published var repositoryText = ""
-    @Published var loadedRepository: GitHubRepository?
-    @Published var releases: [GitHubRelease] = []
-    @Published var releaseID: Int?
-    @Published var assetID: Int?
-    @Published var sourceReceipts: [SourceReceipt] = []
-    @Published var updateLabels: [UUID: String] = [:]
+    @Published var cfReceipts: [CFReceipt] = []
     @Published var networkTask: Task<Void, Never>?
-    @Published var checkOnLaunch = UserDefaults.standard.bool(forKey: "checkGitHubOnLaunch")
-    private var checkedLaunch = false
-    private let github = GitHubClient()
     let library = Library()
-    var chosenRelease: GitHubRelease? { releases.first { $0.id == releaseID } }
-    var chosenAsset: GitHubAsset? { chosenRelease?.zipAssets.first { $0.id == assetID } }
     func runNetwork<T>(_ message: String, operation: @escaping () async throws -> T, completion: @escaping (T) -> Void) {
         guard !busy else { return }
         busy = true; status = message
@@ -70,174 +59,134 @@ struct Prompt: Identifiable {
                 busy = false; networkTask = nil; completion(value)
             } catch {
                 busy = false; networkTask = nil
-                if error is CancellationError || (error as? URLError)?.code == .cancelled { status = "已取消网络操作" }
-                else { self.error = error.localizedDescription; status = "网络操作未完成" }
-            }
-        }
-    }
-    func loadReleases() {
-        do {
-            let repo = try GitHubRepository(repositoryText), github = github
-            releases = []; releaseID = nil; assetID = nil; loadedRepository = nil
-            runNetwork("正在读取 GitHub 正式发布…", operation: { try await github.releases(in: repo) }) { releases in
-                self.loadedRepository = repo; self.releases = releases
-                self.releaseID = releases.first?.id
-                self.status = releases.isEmpty ? "没有找到正式发布，请确认作者是否上传了 Release" : "已读取发布，请选择对应客户端的 ZIP 附件"
-            }
-        } catch { self.error = error.localizedDescription }
-    }
-    func checkGitHubUpdates() {
-        guard let target, !sourceReceipts.isEmpty else { return }
-        let records = sourceReceipts, github = github, flavor = flavor
-        runNetwork("正在检查已记录的 GitHub 来源…", operation: {
-            var results: [UUID: String] = [:], cache: [GitHubRepository: [GitHubRelease]] = [:]
-            for record in records {
-                try Task.checkCancellation()
-                if record.flavor != flavor { results[record.id] = "客户端标记不同，请确认目录"; continue }
-                do {
-                    let unchanged = try await Task.detached { try SourceTracking.isUnchanged(record, in: target) }.value
-                    if !unchanged { results[record.id] = "本地文件已修改或缺失，更新前请核对"; continue }
-                    if cache[record.repository] == nil { cache[record.repository] = try await github.releases(in: record.repository) }
-                    if let next = record.newerRelease(in: cache[record.repository] ?? []) {
-                        results[record.id] = "检测到发布或附件更新：\(next.tagName)，需确认客户端附件"
-                    } else {
-                        results[record.id] = "最近 30 条发布中未发现较新的正式 ZIP"
-                    }
-                } catch {
-                    if Task.isCancelled { throw CancellationError() }
-                    results[record.id] = error.localizedDescription
+                if error is CancellationError || (error as? URLError)?.code == .cancelled { status = "已取消网络操作"; self.installedUpdates = self.installedUpdates.mapValues { $0.label == "检查中…" ? InstalledUpdate(label: "检查已取消") : $0 } }
+                else {
+                    self.error = error.localizedDescription; status = "网络操作未完成"
+                    self.installedUpdates = self.installedUpdates.mapValues { $0.label == "检查中…" ? InstalledUpdate(label: "检查失败，请重试") : $0 }
                 }
             }
-            return results
-        }) { values in self.updateLabels = values; self.status = "GitHub 来源检查完成" }
-    }
-    func downloadChosenAsset() {
-        guard let target, let repo = loadedRepository, let release = chosenRelease, let asset = chosenAsset, gameIsClosed() else { return }
-        let source = GitHubSelection(repository: repo, release: release, asset: asset, flavor: flavor)
-        let github = github, library = library, flavor = flavor
-        runNetwork("正在下载并校验 \(asset.name)…", operation: {
-            let archive = try await github.download(source)
-            defer { try? FileManager.default.removeItem(at: archive) }
-            let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
-            if Task.isCancelled { library.discard(preview); throw CancellationError() }
-            return preview
-        }) { preview in
-            self.status = "下载与 ZIP 检查完成，等待安装确认"
-            self.prompt = Prompt(title: "从 GitHub 安装 \(release.tagName)？", message: "来源：\(repo.fullName)\n附件：\(asset.name)\n目标：\(target.path)\n\n安装：\(preview.folders.map(\.lastPathComponent).joined(separator: "、"))\n覆盖：\(preview.replacing.isEmpty ? "无" : preview.replacing.joined(separator: "、"))\n\n请确认附件适用于\(flavor.rawValue)。覆盖会替换整个文件夹，包括本地修改；系统将先备份。", confirm: "备份并安装", destructive: false, action: {
-                guard self.gameIsClosed(), self.target == target, self.flavor == flavor else { library.discard(preview); return }
-                self.run("正在备份并安装 GitHub 插件…", operation: {
-                    defer { library.discard(preview) }
-                    try library.install(preview, target: target, source: source)
-                }) { self.refresh() }
-            }, cancel: { library.discard(preview); self.status = "已取消安装" })
         }
     }
-    @Published var onlineProvider = "CurseForge"
     @Published var apiKeyInput = ""
-    @Published var keyStatus = "密钥保存在本机钥匙串；不会写入仓库"
+    @Published var keyStatus = "密钥保存在本机钥匙串"
     @Published var cfQuery = ""
     @Published var cfPage: CFSearchPage?
     @Published var cfTypes: [CFVersionType] = []
     @Published var cfTypeID = 0
-    @Published var cfVersion = ""
-    @Published var cfMod: CFMod?
-    @Published var cfFiles: [CFFile] = []
-    @Published var cfReceipts: [CFReceipt] = []
-    @Published var cfCheckOnLaunch = UserDefaults.standard.bool(forKey: "checkCurseForgeOnLaunch")
+    @Published var installedUpdates: [String: InstalledUpdate] = [:]
     private var searchedQuery = ""
     private let keyStore = CurseForgeKeyStore()
     func cfClient() throws -> CurseForgeClient {
-        guard let key = try keyStore.load() else { throw ManagerError("请先保存 CurseForge API Key") }
+        guard let key = try keyStore.load() else { throw ManagerError("请在设置中配置 CurseForge API Key") }
         return try CurseForgeClient(apiKey: key)
     }
     func saveCFKey() {
-        do { try keyStore.save(apiKeyInput); apiKeyInput = ""; keyStatus = "已保存到本机钥匙串，正在验证…"; loadCFTypes() }
+        do { try keyStore.save(apiKeyInput); apiKeyInput = ""; keyStatus = "已保存到本机钥匙串"; bootstrap() }
         catch { self.error = error.localizedDescription }
     }
     func deleteCFKey() {
-        do { try keyStore.delete(); apiKeyInput = ""; cfTypes = []; cfFiles = []; cfPage = nil; keyStatus = "已移除本机密钥" }
-        catch { self.error = error.localizedDescription }
+        do {
+            try keyStore.delete(); apiKeyInput = ""; cfTypes = []; cfPage = nil; installedUpdates = [:]
+            keyStatus = "已移除本机密钥"; status = "请在设置中配置密钥以检查更新"
+        } catch { self.error = error.localizedDescription }
     }
-    func loadCFTypes() {
+    func ensureOnline() {
+        if cfPage == nil && !busy { bootstrap() }
+    }
+    func bootstrap() {
+        guard !busy else { return }
+        do {
+            guard try keyStore.load() != nil else { status = "本地扫描完成；请在设置中配置密钥以自动检查更新"; return }
+            let client = try cfClient(), flavor = flavor
+            runNetwork("正在读取客户端分支与热门插件…", operation: {
+                let types = try await client.versionTypes()
+                guard let type = InstalledUpdates.defaultType(types, flavor: flavor) else { throw ManagerError("CurseForge 未返回对应客户端分支，请在插件库中手动选择") }
+                let page = try await client.search("", typeID: type)
+                return (types, type, page)
+            }) { types, type, page in
+                self.cfTypes = types; self.cfTypeID = type; self.cfQuery = ""; self.searchedQuery = ""; self.cfPage = page
+                self.keyStatus = "接口连接成功 · 密钥存于本机钥匙串"
+                self.checkInstalledUpdates()
+            }
+        } catch { keyStatus = error.localizedDescription; status = error.localizedDescription }
+    }
+    func changeBranch() {
+        guard cfTypeID > 0, !busy else { return }
+        installedUpdates = [:]
+        searchCF(afterSearch: true)
+    }
+    func searchCF(index: Int = 0, afterSearch: Bool = false) {
+        do {
+            let client = try cfClient(), type = cfTypeID
+            guard type > 0 else { throw ManagerError("请先选择客户端分支") }
+            let query = index == 0 ? cfQuery.trimmingCharacters(in: .whitespacesAndNewlines) : searchedQuery
+            runNetwork(query.isEmpty ? "正在加载热门插件…" : "正在搜索插件…", operation: { try await client.search(query, index: index, typeID: type) }) { page in
+                self.cfPage = page; self.searchedQuery = query; self.status = query.isEmpty ? "已加载 CurseForge 热门插件" : "搜索完成"
+                if afterSearch { self.checkInstalledUpdates() }
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+    func checkInstalledUpdates() {
+        guard let target, !addons.isEmpty else { status = "已加载热门插件；选择游戏目录后可安装"; return }
+        guard cfTypeID > 0 else { bootstrap(); return }
+        do {
+            let client = try cfClient(), addons = addons, records = cfReceipts, type = cfTypeID, flavor = flavor
+            installedUpdates = Dictionary(uniqueKeysWithValues: addons.map { ($0.folder, InstalledUpdate(label: "检查中…")) })
+            runNetwork("正在识别本地插件并自动检查新版…", operation: {
+                try await InstalledUpdates.check(target: target, addons: addons, receipts: records, client: client, typeID: type, flavor: flavor)
+            }) { result in
+                guard self.target == target, self.flavor == flavor, self.cfTypeID == type else { return }
+                self.installedUpdates = result
+                let count = result.values.filter { $0.selection != nil }.count
+                self.status = "检查完成 · \(count) 个插件可更新 · 点击更新会自动备份并安装"
+            }
+        } catch { status = error.localizedDescription }
+    }
+    func updateInstalled(_ addon: Addon) {
+        guard let item = installedUpdates[addon.folder], let selection = item.selection else { return }
         do {
             let client = try cfClient()
-            runNetwork("正在验证密钥并读取客户端分支…", operation: { try await client.versionTypes() }) { types in
-                self.cfTypes = types; self.keyStatus = "接口验证成功 · 密钥保存在本机钥匙串"
-                self.status = "请选择作者对应的客户端分支"
+            runNetwork("正在确认最新正式版…", operation: {
+                try await client.files(modID: selection.mod.id, typeID: selection.typeID, version: "")
+            }) { files in
+                guard let latest = files.first else { self.error = "没有可用的正式版本"; return }
+                self.installSelection(CFSelection(mod: selection.mod, file: latest, typeID: selection.typeID, version: "", flavor: selection.flavor), expected: item.expected, requiredFolder: addon.folder)
             }
         } catch { self.error = error.localizedDescription }
     }
-    func searchCF(index: Int = 0) {
+    func installPopular(_ mod: CFMod) {
+        guard target != nil, cfTypeID > 0 else { error = "请先选择游戏目录与客户端分支"; return }
         do {
-            let client = try cfClient(), query = index == 0 ? cfQuery.trimmingCharacters(in: .whitespacesAndNewlines) : searchedQuery
-            runNetwork("正在搜索 CurseForge…", operation: { try await client.search(query, index: index) }) { page in
-                self.cfPage = page; self.searchedQuery = query; self.cfMod = nil; self.cfFiles = []
-                self.status = "搜索完成：本页 \(page.data.count) 项"
+            let client = try cfClient(), type = cfTypeID, flavor = flavor
+            runNetwork("正在获取最新适配版本…", operation: { try await client.files(modID: mod.id, typeID: type, version: "") }) { files in
+                guard let latest = files.first else { self.error = "没有找到此客户端适用的正式版本"; return }
+                self.installSelection(CFSelection(mod: mod, file: latest, typeID: type, version: "", flavor: flavor))
             }
         } catch { self.error = error.localizedDescription }
     }
-    func loadCFFiles(_ mod: CFMod) {
-        guard cfTypeID > 0 else { error = "请先读取并选择客户端分支"; return }
-        do {
-            let client = try cfClient(), type = cfTypeID, version = cfVersion.trimmingCharacters(in: .whitespacesAndNewlines)
-            cfMod = nil; cfFiles = []
-            runNetwork("正在读取匹配的正式版本…", operation: { try await client.files(modID: mod.id, typeID: type, version: version) }) { files in
-                self.cfPage = nil; self.cfMod = mod; self.cfFiles = files
-                self.status = files.isEmpty ? "最近 50 个文件中没有匹配的正式 ZIP" : "请选择文件，核对游戏版本与依赖"
-            }
-        } catch { self.error = error.localizedDescription }
-    }
-    func openCFRecord(_ record: CFReceipt) {
-        do {
-            let client = try cfClient()
-            cfTypeID = record.typeID; cfVersion = record.version; cfFiles = []; cfMod = nil
-            runNetwork("正在读取插件来源…", operation: { try await client.mod(record.modID) }) { mod in self.loadCFFiles(mod) }
-        } catch { self.error = error.localizedDescription }
-    }
-    func downloadCF(_ file: CFFile) {
-        guard let target, let mod = cfMod, gameIsClosed() else { return }
+    func installSelection(_ selection: CFSelection, expected: [String: String] = [:], requiredFolder: String? = nil) {
+        guard let target, gameIsClosed() else { return }
         do {
             let client = try cfClient(), library = library, flavor = flavor
-            let selection = CFSelection(mod: mod, file: file, typeID: cfTypeID, version: cfVersion.trimmingCharacters(in: .whitespacesAndNewlines), flavor: flavor)
-            runNetwork("正在下载、校验与检查 ZIP…", operation: {
+            guard selection.flavor == flavor, selection.typeID == cfTypeID else { throw ManagerError("客户端分支已改变，请重新检查") }
+            runNetwork("正在下载并校验 \(selection.mod.name)…", operation: {
                 let archive = try await client.download(selection)
                 defer { try? FileManager.default.removeItem(at: archive) }
                 let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
-                if Task.isCancelled { library.discard(preview); throw CancellationError() }
-                return preview
-            }) { preview in
-                self.status = "下载与校验完成，等待安装确认"
-                self.prompt = Prompt(title: "安装 \(mod.name)？", message: "文件：\(file.displayName)\n游戏版本：\(file.gameVersions.joined(separator: "、"))\n目标：\(target.path)\n安装：\(preview.folders.map(\.lastPathComponent).joined(separator: "、"))\n覆盖：\(preview.replacing.isEmpty ? "无" : preview.replacing.joined(separator: "、"))\n\n请确认适用于\(flavor.rawValue)。将先备份，再整体替换插件文件夹；依赖需单独安装。", confirm: "备份并安装", destructive: false, action: {
-                    guard self.gameIsClosed(), self.target == target, self.flavor == flavor else { library.discard(preview); return }
-                    self.run("正在备份并安装 CurseForge 插件…", operation: {
-                        defer { library.discard(preview) }
-                        try library.install(preview, target: target, curseForge: selection)
-                    }) { self.refresh() }
-                }, cancel: { library.discard(preview); self.status = "已取消安装" })
-            }
-        } catch { self.error = error.localizedDescription }
-    }
-    func checkCFUpdates() {
-        guard let target, !cfReceipts.isEmpty else { return }
-        do {
-            let client = try cfClient(), records = cfReceipts, flavor = flavor
-            runNetwork("正在检查 CurseForge 来源…", operation: {
-                var labels: [UUID: String] = [:]
-                for record in records {
+                do {
                     try Task.checkCancellation()
-                    do {
-                        guard record.flavor == flavor else { labels[record.id] = "客户端标记不同，请确认目录"; continue }
-                        let unchanged = try await Task.detached { try CFTracking.isUnchanged(record, in: target) }.value
-                        guard unchanged else { labels[record.id] = "本地文件已修改或缺失，请核对后更新"; continue }
-                        let files = try await client.files(modID: record.modID, typeID: record.typeID, version: record.version)
-                        labels[record.id] = record.newerFile(in: files).map { "发现更新：" + $0.displayName } ?? "最近 50 个文件中未发现匹配的新正式版本"
-                    } catch {
-                        if Task.isCancelled { throw CancellationError() }
-                        labels[record.id] = error.localizedDescription
-                    }
-                }
-                return labels
-            }) { labels in self.updateLabels.merge(labels) { _, new in new }; self.status = "CurseForge 更新检查完成" }
+                    if let requiredFolder, !preview.folders.contains(where: { $0.lastPathComponent == requiredFolder }) { throw ManagerError("新版目录与本地插件不匹配，已停止更新") }
+                    let declared = Set((selection.file.modules ?? []).map(\.name))
+                    guard !declared.isEmpty, Set(preview.folders.map(\.lastPathComponent)).isSubset(of: declared) else { throw ManagerError("ZIP 目录与官方文件声明不匹配") }
+                    return preview
+                } catch { library.discard(preview); throw error }
+            }) { preview in
+                guard self.target == target, self.flavor == flavor, self.cfTypeID == selection.typeID, self.gameIsClosed() else { library.discard(preview); return }
+                self.run("正在自动备份并安装 \(selection.mod.name)…", operation: {
+                    defer { library.discard(preview) }
+                    try library.install(preview, target: target, curseForge: selection, expected: expected)
+                }) { self.refresh() }
+            }
         } catch { self.error = error.localizedDescription }
     }
     var visible: [Addon] {
@@ -263,18 +212,12 @@ struct Prompt: Identifiable {
     func refresh() {
         guard let target else { return }
         let flavor = flavor, library = library
-        run("正在扫描插件…", operation: { (try AddonScanner.scan(target, flavor: flavor), try library.snapshots(for: target), try SourceTracking.receipts(in: target), try CFTracking.receipts(in: target)) }) { value in
+        run("正在扫描插件…", operation: { (try AddonScanner.scan(target, flavor: flavor), try library.snapshots(for: target), try CFTracking.receipts(in: target)) }) { value in
             guard self.target == target, self.flavor == flavor else { self.refresh(); return }
-            self.addons = value.0; self.snapshots = value.1; self.sourceReceipts = value.2; self.cfReceipts = value.3; self.updateLabels = [:]
+            self.addons = value.0; self.snapshots = value.1; self.cfReceipts = value.2; self.installedUpdates = [:]
             self.selected.formIntersection(Set(value.0.map(\.folder)))
             self.status = "已扫描 \(value.0.count) 个插件 · \(Date().formatted(date: .omitted, time: .shortened))"
-            if !self.checkedLaunch {
-                self.checkedLaunch = true
-                Task {
-                    if self.checkOnLaunch { self.checkGitHubUpdates(); await self.networkTask?.value }
-                    if self.cfCheckOnLaunch { self.checkCFUpdates() }
-                }
-            }
+            if self.cfTypes.isEmpty { self.bootstrap() } else { self.checkInstalledUpdates() }
         }
     }
     func chooseDirectory() {
@@ -290,7 +233,7 @@ struct Prompt: Identifiable {
     }
     func selectTarget(_ url: URL) {
         guard !busy else { return }
-        target = url; selected = []; addons = []; snapshots = []; sourceReceipts = []; cfReceipts = []; updateLabels = [:]
+        target = url; selected = []; addons = []; snapshots = []; cfReceipts = []; installedUpdates = [:]
         UserDefaults.standard.set(url.path, forKey: "target")
         showCandidates = false; refresh()
     }
@@ -352,7 +295,7 @@ struct ContentView: View {
                     VStack(alignment: .leading) { Text("艾泽拉斯").font(.title3.bold()); Text("插 件 管 家").font(.caption).foregroundStyle(.secondary) }
                 }.padding(.top, 18)
                 Text("工作空间").font(.caption).foregroundStyle(.secondary)
-                ForEach(["插件库", "在线插件", "备份与恢复", "关于与更新"], id: \.self) { item in
+                ForEach(["插件库", "在线插件", "备份与恢复", "设置与关于"], id: \.self) { item in
                     Button { page = item } label: {
                         Label(item, systemImage: item == "插件库" ? "square.grid.2x2" : item == "在线插件" ? "network" : item == "备份与恢复" ? "clock.arrow.circlepath" : "info.circle")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(11)
@@ -363,7 +306,7 @@ struct ContentView: View {
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
                     Label("本地 + 在线来源", systemImage: "internaldrive").foregroundStyle(gold)
-                    Text("CurseForge / GitHub\n搜索、下载与更新检查。").font(.caption).foregroundStyle(.secondary)
+                    Text("自动检查已安装插件\n一键更新，先备份。").font(.caption).foregroundStyle(.secondary)
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }.padding(22).frame(width: 205).background(Color(red: 0.065, green: 0.075, blue: 0.09))
             Divider()
@@ -379,10 +322,11 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.3.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.4.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
+        .task { model.ensureOnline() }
         .disabled(model.busy)
         .overlay(alignment: .bottomTrailing) {
             if model.networkTask != nil {
@@ -424,7 +368,8 @@ struct ContentView: View {
                 }
                 Spacer()
                 Picker("客户端", selection: $model.flavor) { ForEach(Flavor.allCases) { Text($0.rawValue).tag($0) } }.labelsHidden().frame(width: 145)
-                    .onChange(of: model.flavor) { _, value in UserDefaults.standard.set(value.rawValue, forKey: "flavor"); model.refresh() }
+                    .onChange(of: model.flavor) { _, value in
+                        model.cfTypes = []; model.cfTypeID = 0; model.installedUpdates = [:]; UserDefaults.standard.set(value.rawValue, forKey: "flavor"); model.refresh() }
             }.padding(16).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
         }
     }
@@ -434,6 +379,7 @@ struct ContentView: View {
                 Text("\(model.addons.count)").font(.title.bold()).foregroundStyle(gold)
                 Text("个本地插件").foregroundStyle(.secondary)
                 Spacer()
+                Button("检查更新", systemImage: "arrow.down.circle", action: model.checkInstalledUpdates)
                 Button("重新扫描", systemImage: "arrow.clockwise", action: model.refresh)
                 Button(action: model.importZIP) {
                     Label("导入 ZIP", systemImage: "plus")
@@ -441,6 +387,7 @@ struct ContentView: View {
                         .background(gold, in: RoundedRectangle(cornerRadius: 6))
                 }.buttonStyle(.plain)
             }.disabled(model.target == nil)
+            branchPicker
             HStack {
                 TextField("搜索名称、文件夹或作者", text: $model.search).textFieldStyle(.roundedBorder).frame(maxWidth: 350)
                 Spacer()
@@ -462,7 +409,17 @@ struct ContentView: View {
                     }.width(min: 180, ideal: 260)
                     TableColumn("版本", value: \.version).width(min: 80, ideal: 110)
                     TableColumn("作者", value: \.author).width(min: 90, ideal: 130)
-                    TableColumn("接口声明", value: \.interface).width(min: 90, ideal: 120)
+                    TableColumn("最新版本") { addon in
+                        Text(model.installedUpdates[addon.folder]?.latest ?? "—").font(.caption).lineLimit(2)
+                    }.width(min: 90, ideal: 120)
+                    TableColumn("状态 / 操作") { addon in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(model.installedUpdates[addon.folder]?.label ?? "等待检查").font(.caption).lineLimit(2)
+                            if model.installedUpdates[addon.folder]?.selection != nil {
+                                Button("更新", systemImage: "arrow.down.circle") { model.updateInstalled(addon) }
+                            }
+                        }.padding(.vertical, 4)
+                    }.width(min: 140, ideal: 180)
                 }.frame(minHeight: 200)
                 if model.selected.count == 1, let addon = model.addons.first(where: { model.selected.contains($0.folder) }) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -471,7 +428,7 @@ struct ContentView: View {
                     }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
-            Label("接口版本仅作展示，不能据此保证适配时光服。请安装可信来源、对应客户端的插件。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            Label("自动识别并检查已安装插件；点击更新将备份并替换整个插件包。未识别来源不会被标记为最新。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var backupView: some View {
@@ -495,175 +452,88 @@ struct ContentView: View {
             }.listStyle(.inset)
         }
     }
+    private var branchPicker: some View {
+        HStack {
+            Picker("客户端分支", selection: $model.cfTypeID) {
+                Text("连接中 / 待配置").tag(0)
+                ForEach(model.cfTypes) { type in Text(type.name).tag(type.id) }
+            }.frame(maxWidth: 380)
+                .onChange(of: model.cfTypeID) { old, new in if old != new { model.installedUpdates = [:]; if old != 0 && new != 0 { model.changeBranch() } } }
+            Text("只安装此分支的最新正式版").font(.caption).foregroundStyle(.secondary)
+        }
+    }
     private var onlineView: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Picker("插件来源", selection: $model.onlineProvider) {
-                Text("CurseForge").tag("CurseForge")
-                Text("GitHub 作者发布").tag("GitHub")
-            }.pickerStyle(.segmented)
-            if model.onlineProvider == "CurseForge" { curseForgeView } else { githubView }
-        }
-    }
-    private var curseForgeView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("CurseForge 插件搜索").font(.title3.bold())
+            HStack {
+                Text("发现插件").font(.title2.bold())
+                Spacer()
+                Button("热门插件") { model.cfQuery = ""; model.searchCF() }
+            }
+            branchPicker
+            HStack {
+                TextField("搜索 CurseForge 插件", text: $model.cfQuery).textFieldStyle(.roundedBorder).onSubmit { model.searchCF() }
+                Button("搜索") { model.searchCF() }
+            }
+            Text("点击安装会自动获取最新适配版本、校验文件、备份并安装。插件包可能包含多个文件夹；依赖暂需单独安装。").font(.caption).foregroundStyle(.secondary)
+            if let page = model.cfPage {
                 HStack {
-                    SecureField("输入 API Key", text: $model.apiKeyInput).textFieldStyle(.roundedBorder)
-                    Button("保存并验证", action: model.saveCFKey).disabled(model.apiKeyInput.isEmpty)
-                    Button("验证已存密钥 / 读取分支", action: model.loadCFTypes)
-                    Button("移除密钥", action: model.deleteCFKey)
-                }
-                Text(model.keyStatus).font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Picker("客户端分支", selection: $model.cfTypeID) {
-                        Text("请选择分支").tag(0)
-                        ForEach(model.cfTypes) { type in Text(type.name).tag(type.id) }
-                    }.onChange(of: model.cfTypeID) { _, _ in model.cfFiles = []; model.cfMod = nil }
-                    TextField("可选：精确游戏版本，如 12.0.0", text: $model.cfVersion).textFieldStyle(.roundedBorder)
-                        .onChange(of: model.cfVersion) { _, _ in model.cfFiles = []; model.cfMod = nil }
-                }
-                Text("请按作者说明选择实际客户端分支。国服时光服标记不代表 CurseForge 已验证兼容；仅列出匹配分支的正式 ZIP，依赖需单独安装。").font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    TextField("插件名或关键词（留空浏览热门）", text: $model.cfQuery).textFieldStyle(.roundedBorder).onSubmit { model.searchCF() }
-                    Button("搜索") { model.searchCF() }
-                }
-                if let page = model.cfPage {
-                    HStack {
-                        Text("第 \(page.pagination.index / 20 + 1) 页 · 共 \(page.pagination.totalCount) 项").foregroundStyle(.secondary)
-                        Spacer()
-                        Button("上一页") { model.searchCF(index: max(0, page.pagination.index - 20)) }.disabled(page.pagination.index == 0)
-                        Button("下一页") { model.searchCF(index: page.pagination.index + 20) }.disabled(!page.hasNext || page.pagination.index >= 9980)
-                    }
-                    ForEach(page.data) { mod in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(mod.name).fontWeight(.medium)
-                                Text(mod.summary).font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                                if let url = mod.safeWebsite { Link("作者页面", destination: url) }
-                                if mod.allowModDistribution == false { Text("作者禁止第三方分发，请在作者页面获取").font(.caption).foregroundStyle(.orange) }
-                            }
-                            Spacer()
-                            Button("查看版本") { model.loadCFFiles(mod) }.disabled(model.cfTypeID == 0 || mod.allowModDistribution == false)
-                        }.padding(12).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-                if let mod = model.cfMod {
-                    Divider()
-                    Text(mod.name + " · 可用正式文件").font(.headline)
-                    if model.cfFiles.isEmpty { Text("最近 50 个文件中没有匹配结果，请核对客户端分支和游戏版本。").foregroundStyle(.secondary) }
-                    ForEach(model.cfFiles) { file in
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text(file.displayName).fontWeight(.medium)
-                            Text("游戏版本：" + file.gameVersions.joined(separator: "、")).font(.caption).foregroundStyle(.secondary)
-                            Text("\(file.fileDate) · \(ByteCountFormatter.string(fromByteCount: Int64(file.fileLength), countStyle: .file))").font(.caption).foregroundStyle(.secondary)
-                            let required = file.dependencies.filter { $0.relationType == 3 }
-                            if !required.isEmpty { Text("必需依赖（插件 ID）：" + required.map { String($0.modId) }.joined(separator: "、")).font(.caption).foregroundStyle(.orange) }
-                            Button("下载、校验并预览安装") { model.downloadCF(file) }.disabled(model.target == nil || mod.allowModDistribution == false)
-                        }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-                Divider()
-                HStack {
-                    Text("已安装的 CurseForge 来源").font(.headline)
+                    Text(model.cfQuery.isEmpty ? "CurseForge 热门插件" : "搜索结果").font(.headline)
                     Spacer()
-                    Button("检查更新", action: model.checkCFUpdates).disabled(model.cfReceipts.isEmpty)
+                    Text("第 \(page.pagination.index / 20 + 1) 页").foregroundStyle(.secondary)
+                    Button("上一页") { model.searchCF(index: max(0, page.pagination.index - 20)) }.disabled(page.pagination.index == 0)
+                    Button("下一页") { model.searchCF(index: page.pagination.index + 20) }.disabled(!page.hasNext || page.pagination.index >= 9980)
                 }
-                Toggle("启动时自动检查 CurseForge 更新", isOn: $model.cfCheckOnLaunch)
-                    .onChange(of: model.cfCheckOnLaunch) { _, value in UserDefaults.standard.set(value, forKey: "checkCurseForgeOnLaunch") }
-                Text("默认关闭；按安装时的分支与可选游戏版本检查。更新仍需预览、确认并备份，不会静默覆盖本地文件。").font(.caption).foregroundStyle(.secondary)
-                if model.cfReceipts.isEmpty { Text("通过 CurseForge 安装后会记录来源。已有的手动插件不会自动匹配。").foregroundStyle(.secondary) }
-                ForEach(model.cfReceipts) { record in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("插件 ID \(record.modID) · 文件 ID \(record.fileID)").fontWeight(.medium)
-                            Spacer()
-                            Button("查看版本 / 更新") { model.openCFRecord(record) }
-                        }
-                        Text(record.folders.joined(separator: "、")).font(.caption).foregroundStyle(.secondary)
-                        Text("\(record.flavor.rawValue) · 分支 \(record.typeID) · \(record.version.isEmpty ? "不限精确版本" : record.version)").font(.caption).foregroundStyle(.secondary)
-                        if let label = model.updateLabels[record.id] { Text(label).foregroundStyle(gold) }
-                    }.padding(12).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                }
-            }.padding(.bottom, 10)
-        }
-    }
-    private var githubView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("GitHub 作者发布").font(.title3.bold())
-                Text("输入作者的公开仓库。只读取最近 30 条发布中的正式版 ZIP 附件；不使用源码压缩包。请选择作者标明适用于当前客户端的文件。").foregroundStyle(.secondary)
-                HStack {
-                    TextField("owner/repo 或 https://github.com/owner/repo", text: $model.repositoryText).textFieldStyle(.roundedBorder)
-                        .onSubmit { model.loadReleases() }
-                    Button("读取发布", action: model.loadReleases).disabled(model.repositoryText.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-                if let repository = model.loadedRepository {
-                    Link("查看 \(repository.fullName) 的作者页面", destination: repository.webURL)
-                    if model.releases.isEmpty { Text("未找到正式发布。该仓库可能只提供源码或预发布版本。").foregroundStyle(.secondary) }
-                    else {
-                        Picker("正式版本", selection: $model.releaseID) {
-                            ForEach(model.releases) { release in Text(release.title + " · " + release.tagName).tag(Optional(release.id)) }
-                        }.onChange(of: model.releaseID) { _, _ in model.assetID = nil }
-                        if let release = model.chosenRelease {
-                            Text(release.body ?? "作者未填写更新说明").font(.caption).foregroundStyle(.secondary).lineLimit(8).textSelection(.enabled)
-                            if release.zipAssets.isEmpty { Text("此发布没有可安装的 ZIP 附件。").foregroundStyle(.secondary) }
-                            ForEach(release.zipAssets) { asset in
-                                HStack {
-                                    Button { model.assetID = asset.id } label: {
-                                        HStack {
-                                            Image(systemName: model.assetID == asset.id ? "checkmark.circle.fill" : "circle")
-                                            Text(asset.name).lineLimit(2)
-                                        }
-                                    }.buttonStyle(.plain)
-                                    Spacer()
-                                    Text(ByteCountFormatter.string(fromByteCount: Int64(asset.size), countStyle: .file)).font(.caption).foregroundStyle(.secondary)
-                                    Text(asset.digest == nil ? "无远端摘要" : "提供 SHA-256").font(.caption).foregroundStyle(.secondary)
-                                }.padding(10).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
-                            }
-                            Button("下载、检查并预览安装", systemImage: "arrow.down.circle", action: model.downloadChosenAsset)
-                                .disabled(model.chosenAsset == nil || model.target == nil)
-                            if model.target == nil { Text("先选择游戏目录才能安装。").font(.caption).foregroundStyle(.secondary) }
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(page.data) { mod in
+                            HStack(alignment: .top, spacing: 18) {
+                                Image(systemName: "puzzlepiece.extension.fill").font(.title).foregroundStyle(gold).frame(width: 44, height: 48)
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Text(mod.name).font(.headline)
+                                    Text(mod.summary).font(.callout).foregroundStyle(.secondary).lineLimit(3)
+                                    if let url = mod.safeWebsite { Link("作者页面", destination: url).font(.caption) }
+                                    if mod.allowModDistribution == false { Text("作者不允许第三方下载").font(.caption).foregroundStyle(.orange) }
+                                }
+                                Spacer()
+                                if model.cfReceipts.contains(where: { $0.modID == mod.id }) || model.installedUpdates.values.contains(where: { $0.sourceID == mod.id }) {
+                                    Text("已安装").foregroundStyle(.secondary)
+                                } else {
+                                    Button("安装", systemImage: "arrow.down.circle") { model.installPopular(mod) }
+                                        .disabled(model.target == nil || model.cfTypeID == 0 || mod.allowModDistribution == false)
+                                }
+                            }.padding(16).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                         }
                     }
                 }
-                Divider()
-                HStack {
-                    Text("已记录的 GitHub 来源").font(.title3.bold())
-                    Spacer()
-                    Button("检查更新", systemImage: "arrow.clockwise", action: model.checkGitHubUpdates).disabled(model.sourceReceipts.isEmpty)
-                }
-                Toggle("启动时自动检查 GitHub 更新", isOn: $model.checkOnLaunch)
-                    .onChange(of: model.checkOnLaunch) { _, value in UserDefaults.standard.set(value, forKey: "checkGitHubOnLaunch") }
-                Text("自动检查默认关闭；只检查来源记录，不会静默安装。已手动安装的插件不会被猜测绑定到某个仓库。更新时仍需选择客户端附件并确认。").font(.caption).foregroundStyle(.secondary)
-                if model.sourceReceipts.isEmpty { Text("通过上方下载并安装后，将在此记录来源。手动 ZIP 导入暂不跟踪在线版本。").foregroundStyle(.secondary) }
-                ForEach(model.sourceReceipts) { record in
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text(record.repository.fullName).fontWeight(.medium)
-                            Spacer()
-                            Button("查看发布 / 更新") {
-                                model.repositoryText = record.repository.fullName; model.loadReleases()
-                            }
-                        }
-                        Text("已安装：\(record.tagName) · \(record.flavor.rawValue)\n附件：\(record.assetName)\n插件：\(record.folders.joined(separator: "、"))").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                        if let label = model.updateLabels[record.id] { Text(label).font(.callout).foregroundStyle(gold) }
-                    }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-                }
-                Text("GitHub 匿名请求有频率限制，网络失败会明确报错。").font(.caption).foregroundStyle(.secondary)
-            }.padding(.bottom, 10)
-        }
+            } else {
+                ContentUnavailableView("等待连接 CurseForge", systemImage: "network", description: Text("在设置中保存 API Key 后，会自动显示热门插件并检查本地插件。"))
+            }
+        }.onAppear { model.ensureOnline() }
     }
     private var aboutView: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Label("CurseForge 与 GitHub · v0.3", systemImage: "network").font(.title3.bold()).foregroundStyle(gold)
-            Text("已接入公开 GitHub 仓库的正式发布 ZIP：读取版本、下载、安全安装、来源记录和新版本检查。可选择启动时自动检查，更新安装仍需确认。已接入 CurseForge 搜索、版本筛选、校验下载和更新检查。密钥保存在本机钥匙串。无人值守自动安装尚未实现。")
-            Divider()
-            Text("使用前请退出游戏").font(.headline)
-            Text("先确认实际客户端的 AddOns 路径，再导入 ZIP。时光服用途标记不代表自动适配；TOC 优先读取通用文件，正式服优先读取 Mainline 文件。请在游戏内验证兼容性。")
-            Text("安全与恢复").font(.headline)
-            Text("只接受常规 ZIP，拒绝路径穿越、链接、加密、ZIP64、重复路径与超限压缩包。安装按文件夹整体替换，避免混留旧文件。操作期间请勿同时使用其他插件管理器或修改 AddOns。异常中断的恢复方法见工程 README。")
-            Spacer()
-        }.foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Label("艾泽拉斯插件管家 · v0.4", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Text("插件库自动检查已安装插件，显示最新状态和更新按钮。在线安装默认展示 CurseForge 热门插件。GitHub 安装来源已移除。")
+                GroupBox("CurseForge 连接") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SecureField("API Key", text: $model.apiKeyInput).textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("保存并连接", action: model.saveCFKey).disabled(model.apiKeyInput.isEmpty)
+                            Button("重新连接", action: model.bootstrap)
+                            Button("移除密钥", action: model.deleteCFKey)
+                        }
+                        Text(model.keyStatus).font(.caption).foregroundStyle(.secondary)
+                        Text("密钥只保存在本机钥匙串。扫描仅向官方接口发送代码指纹数字与插件项目 ID，不上传源码或游戏设置。").font(.caption).foregroundStyle(.secondary)
+                    }.padding(8)
+                }
+                Divider()
+                Text("自动检查与一键更新").font(.headline)
+                Text("每次启动、扫描或安装完成后自动检查。优先使用安装记录和 CurseForge 精确指纹识别本地插件，并读取 TOC 项目 ID 作为补充；无法可靠识别时显示“未识别来源”，不会假报最新。更新按钮直接安装所选客户端的最新正式版本，并自动保存完整 AddOns 备份。")
+                Text("请退出游戏后更新。一次更新可能替换同一插件包的多个文件夹，本地修改也会被替换；WTF 设置不会更改。检查后发生本地变更会中止安装，需重新检查。依赖暂不自动安装，未提供无人值守定时更新。")
+                Text("国服时光服默认匹配 WoW Wrath Titan Reforged，正式服匹配 WoW Retail。作者标记仍不能保证游戏内兼容。应用仅本机临时签名，尚无发行签名或公证。").font(.caption).foregroundStyle(.secondary)
+            }.padding(.bottom, 12)
+        }
     }
+
 }

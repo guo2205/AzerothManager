@@ -65,6 +65,8 @@ public struct CFFile: Decodable, Identifiable, Hashable, Sendable {
     public let sortableGameVersions: [Version]
     public let hashes: [Hash]
     public let dependencies: [Dependency]
+    public let modules: [Module]?
+    public struct Module: Decodable, Hashable, Sendable { public let name: String; public let fingerprint: UInt32 }
     public struct Version: Decodable, Hashable, Sendable { public let gameVersionTypeId: Int? }
     public struct Hash: Decodable, Hashable, Sendable { public let value: String; public let algo: Int }
     public struct Dependency: Decodable, Hashable, Sendable { public let modId: Int; public let relationType: Int }
@@ -114,9 +116,11 @@ public final class CurseForgeClient: @unchecked Sendable {
         let response: CFResponse<[CFVersionType]> = try await api("games/1/version-types")
         return response.data.filter { $0.gameId == 1 }.sorted { $0.name < $1.name }
     }
-    public func search(_ query: String, index: Int = 0) async throws -> CFSearchPage {
+    public func search(_ query: String, index: Int = 0, typeID: Int? = nil) async throws -> CFSearchPage {
         guard index >= 0, index <= 9980 else { throw ManagerError("已达到搜索分页上限") }
-        return try await api("mods/search", query: [URLQueryItem(name: "gameId", value: "1"), URLQueryItem(name: "searchFilter", value: query), URLQueryItem(name: "pageSize", value: "20"), URLQueryItem(name: "index", value: String(index)), URLQueryItem(name: "sortField", value: "2"), URLQueryItem(name: "sortOrder", value: "desc")])
+        var items = [URLQueryItem(name: "gameId", value: "1"), URLQueryItem(name: "searchFilter", value: query), URLQueryItem(name: "pageSize", value: "20"), URLQueryItem(name: "index", value: String(index)), URLQueryItem(name: "sortField", value: "2"), URLQueryItem(name: "sortOrder", value: "desc")]
+        if let typeID, typeID > 0 { items.append(URLQueryItem(name: "gameVersionTypeId", value: String(typeID))) }
+        return try await api("mods/search", query: items)
     }
     public func mod(_ id: Int) async throws -> CFMod {
         guard id > 0 else { throw ManagerError("插件 ID 无效") }
@@ -164,10 +168,17 @@ public final class CurseForgeClient: @unchecked Sendable {
             return location
         } catch { try? handle.close(); try? FileManager.default.removeItem(at: location); throw error }
     }
-    private func api<Value: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> Value {
+    public func matches(_ fingerprints: [UInt32]) async throws -> [CFFingerprintMatch] {
+        guard !fingerprints.isEmpty, fingerprints.count <= 100 else { return [] }
+        let body = try JSONEncoder().encode(["fingerprints": fingerprints])
+        let response: CFResponse<CFFingerprintResults> = try await api("fingerprints/1", body: body)
+        return response.data.exactMatches.filter { $0.file.gameId == 1 }
+    }
+    private func api<Value: Decodable>(_ path: String, query: [URLQueryItem] = [], body: Data? = nil) async throws -> Value {
         var components = URLComponents(string: "https://api.curseforge.com/v1/" + path)!
         if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
+        if let body { request.httpMethod = "POST"; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         request.setValue(key, forHTTPHeaderField: "x-api-key"); request.setValue("application/json", forHTTPHeaderField: "Accept")
         let (stream, response) = try await session.bytes(for: request)
         defer { stream.task.cancel() }

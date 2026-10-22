@@ -1,133 +1,61 @@
-# 艾泽拉斯 · 插件管家 0.3
+# 艾泽拉斯 · 插件管家 0.4
 
-原生 SwiftUI 中文 macOS 应用。优先提供国服时光服的本地管理工作流，同时支持正式服目录。**时光服是用途标记，不是自动识别或兼容性认证。** 已支持 CurseForge 插件搜索、客户端分支筛选、下载校验和更新检查，也支持 GitHub 作者发布。无人值守自动安装尚未实现。
+原生 SwiftUI 中文 macOS 魔兽世界插件管理器，支持国服时光服和正式服。插件库显示本地已安装插件，自动检查新版；在线安装默认显示 CurseForge 热门插件。GitHub 安装入口已移除。
 
-## 已编译应用
+## 使用流程
 
-交付包同时附带 `AzerothManager-v0.3.app.zip`，解压后双击应用即可在本机试用。源码使用 Xcode 26.6 实际编译通过，27 项离线核心测试通过，并完成真实 GitHub 下载与临时目录安装测试；详情见 `VALIDATION.md`。通用二进制支持 Apple Silicon / Intel，Intel 尚未做硬件运行验证。
+1. 解压 `AzerothManager-v0.4.app.zip`，启动应用。在「设置与关于」保存自己的 CurseForge API Key。密钥只保存在本机登录钥匙串，不写入源码、偏好设置或来源记录。
+2. 选择游戏目录或现有的 `Interface/AddOns`，核对客户端用途。国服时光服默认匹配官方分支 `WoW Wrath Titan Reforged`，正式服匹配 `WoW Retail`。也可手动选择其他客户端分支。
+3. 插件库列出名称、文件夹、本地版本、作者、最新版本和状态。启动、重新扫描、安装完成后自动检查，也可手动点击「检查更新」。无需先通过本管理器安装插件。
+4. 「有新版本」会显示「更新」按钮。点击后重新获取最新适配正式版，自动下载、校验、备份整个 AddOns，再整体替换插件包，完成后刷新状态。正常流程无第二次确认或版本选择。请先退出游戏。
+5. 「已是最新」不显示更新按钮；本地版本比服务器较新时不主动降级；未知来源、缺少适配版本、分发限制、来源冲突、网络失败分别显示，不会冒充最新。
+6. 在线页自动展示所选客户端的 CurseForge 热门插件，每页 20 个，支持搜索、翻页。点击「安装」自动安装最新适配正式版，不要求手选历史文件。
+7. 可继续手动导入 ZIP、卸载插件、备份和恢复。导入/卸载/恢复仍会提示确认；在线安装与更新由按钮直接执行。所有修改前自动备份。
 
-应用为本机临时签名，没有正式发行签名或公证。
+## 自动识别与版本判断
 
-## CurseForge 搜索、下载与更新（v0.3）
+- 优先使用本机安装记录、CurseForge 精确代码指纹和 TOC 的 `X-Curse-Project-ID`。指纹基于 TOC/XML 引用代码与 Bindings.xml，按 CurseForge 的 MurmurHash2 协议计算；只发送数字指纹到官方 API，不上传源码、游戏设置或本地路径。
+- 指纹能识别原先手动安装的插件；没有指纹匹配、没有项目 ID 的私有或修改版显示「未识别来源」。目前没有手动关联来源功能，不按名字猜测并覆盖。
+- 版本按安装文件 ID、分支和发布时间比较，不对任意版本字符串强行排序。「已是最新」基于匹配文件或安装记录。项目 ID 可确定但版本无法识别时显示「本地版本未识别」，可点击更新以安装该项目的最新正式版；这可能覆盖本地定制内容。
+- 一次安装/更新可能包含多个插件文件夹，会一起替换并记录。检查后本地文件发生变化会中止更新，需重新检查；不会静默覆盖新产生的修改。安装记录和代码指纹有冲突时不提供自动更新。
+- 获取文件列表仅使用 API 最近 50 个匹配文件中的正式 ZIP，跳过 Beta/Alpha；客户端分支由官方 API 返回。来源相同的插件复用查询。
+- 作者禁止第三方分发或 API 不提供下载链接时，应用不会绕过限制。在线页仍可查看作者页面。依赖暂需单独安装；不提供批量更新、无人值守后台定时更新或来源全覆盖保证。
 
-1. 在「在线插件 → CurseForge」输入自己的 API Key，点击「保存并验证」。密钥只保存在本机登录钥匙串；清空输入框，不写入偏好设置、来源记录、日志或源码。可验证已保存密钥或移除它。交付应用不内置共享密钥。
-2. 读取官方客户端分支，按作者说明选择。例如 API 实测返回 `WoW Wrath Titan Reforged` 和 `WoW Retail`。本地「国服时光服」标签不会自动替你决定分支。可选填写精确游戏版本；留空列出所选分支的版本。
-3. 搜索关键词（留空浏览热门），每页 20 项，支持翻页。查看插件版本后列出 API 返回的最近 50 个文件中匹配的正式 ZIP，显示作者标记的游戏版本与必需依赖 ID。依赖当前需单独搜索、安装。
-4. 下载前重新检查作者分发许可，只使用 API 提供的下载地址；无链接或作者禁止第三方分发时提示到作者页面。认证请求不跟随重定向，API Key 不发送给下载 CDN。ZIP 大小上限 256 MiB，检查声明长度和 API 提供的 SHA-1 / MD5 摘要，再执行本地 ZIP 安全检查。
-5. 下载完成后预览实际文件夹与覆盖列表，确认才会先备份再安装。通过 CurseForge 安装的记录可手动检查更新，或选择启动自动检查（默认关闭）。检查使用安装时的分支、可选精确版本、发布时间及文件 ID；本地修改会提示人工核对。更新仍需用户预览确认，不静默安装。
+## 安全与备份
 
-来源记录位于 AddOns 下的 `.azeroth-curseforge.json`，只保存来源 ID、版本筛选条件、客户端标记、文件夹和指纹，随备份恢复。手动 ZIP、GitHub 或 CurseForge 覆盖同一包的任意文件夹，或卸载时，会清除冲突的旧记录。已有手动安装的插件暂不自动绑定 CurseForge ID；未实现全库指纹匹配、一键批量更新、自动安装依赖或后台定时更新。
+只使用官方 HTTPS API 和允许的 forgecdn.net 文件地址。认证请求不跟随重定向；下载 CDN 不接收 API Key。下载上限 256 MiB，验证声明大小和 API 提供的 SHA-1/MD5 摘要，再交给安全 ZIP 读取器。API 请求使用临时会话，不持久缓存目录数据。
 
-请求使用临时 URLSession，不持久缓存 API 数据；密钥失效、权限拒绝、限流、格式错误、摘要不符与下载不完整均明确报错。遵循作者分发设置，不推导下载链接绕过限制。接口依据：[CurseForge 官方 REST API](https://docs.curseforge.com/rest-api/)。实际联网验证和限制见 `VALIDATION.md`。
+ZIP 支持 Stored/Deflate，拒绝路径穿越、绝对路径、符号链接、重复路径、大小写/Unicode 冲突、加密、ZIP64、CRC 不符和超限归档。不执行 Lua/XML。安装按文件夹整体替换，避免旧文件残留；使用同卷暂存和重命名提交，异常会尝试回滚。
 
-## GitHub 下载和更新（v0.2）
+备份位于 `~/Library/Application Support/AzerothManager/Backups`，包含完整 AddOns 和来源记录，不包含 WTF/SavedVariables。恢复前会再备份当前目录；恢复会整体替换 AddOns。备份暂不自动清理。操作期间请停止其他管理器和外部文件修改。
 
-1. 在「在线插件」输入作者公开仓库，如 `owner/repo` 或其 HTTPS 仓库首页地址，点击「读取发布」。不是全站插件搜索；必须知道作者仓库地址。
-2. 从最近 30 条发布中的正式版本选择客户端对应的 ZIP 附件。跳过草稿和预发布，不使用自动生成的源码 ZIP。
-3. 点击「下载、检查并预览安装」。下载大小受 256 MiB 限制；服务器提供 SHA-256 时会校验，否则明确标注无远端摘要。ZIP 继续经过原有安全读取器。
-4. 确认来源、文件名、目标目录及覆盖列表后，先备份再安装。来源并不保证客户端兼容；时光服必须由用户按作者说明选择。
-5. 通过 GitHub 安装的插件会记录仓库、发布 ID、附件 ID、版本标签、客户端和文件内容指纹。在「已记录的 GitHub 来源」点击「检查更新」或开启「启动时自动检查」。自动检查默认关闭，不会静默下载或安装。
-6. 发现更新后点击「查看发布 / 更新」，再次选择适用附件并确认。判断使用发布时间和 ID，同一发布下同名附件重新上传也会提示；不会按版本字符串排序猜测更新。
+来源记录位于 `.azeroth-curseforge.json`，只保存来源/文件 ID、分支、客户端、文件夹和内容指纹。手动覆盖、卸载会清理冲突记录；备份恢复会带回记录。旧版 GitHub 记录仅保留兼容处理，不再有 GitHub 浏览、下载或检查入口。
 
-来源记录保存在目标 AddOns 根目录的 `.azeroth-sources.json`，随完整目录备份与恢复。手动 ZIP 覆盖、卸载任一属于同一发布包的文件夹时，会移除该包的整条跟踪记录，避免误认版本。手动导入、原先已有的插件不会自动绑定仓库。来源 JSON 损坏会明确报错并中止修改。
+游戏运行检测只是按应用名称判断，请自行确认退出。API 的客户端标记不代表游戏内兼容认证；修改版、国服定制版可能无法匹配。版本、依赖、接口声明来自作者 metadata。
 
-检查更新会计算已跟踪插件的文件指纹；本地修改或文件缺失会提示人工核对。用户显式确认安装仍可覆盖本地修改，覆盖前保留完整备份。同一仓库可提供多个客户端附件，管理器不推断或自动切换附件；改名或拆分的插件文件夹不会自动删除旧目录，需人工核对。
+## 编译运行
 
-网络请求匿名访问公开 GitHub API，没有内置密钥，不需要提供 GitHub 密码。遵循 HTTPS，仅允许 GitHub 和其文件 CDN 重定向。GitHub 额度限制、仓库不可用、摘要失败和下载不完整会显示错误。下载与读取发布时可取消。当前为加载状态提示，不提供实时百分比。GitHub 访问速度取决于用户网络。
+- macOS 14+，Xcode 15+，Swift 5.9+。实际验证环境 Xcode 26.6 / Apple Silicon。
+- 打开 `AzerothManager.xcodeproj`，选择 **AzerothManager → My Mac**，按 **⌘R**。保留工程附带的本地 Swift Package。
+- 使用本机临时签名，不需要付费开发者账号；应用未做 Developer ID 发行签名或 Apple 公证。未启用 App Sandbox。
 
-真实联网冒烟测试（只操作临时目录）：
-
-```sh
-AZEROTH_LIVE_GITHUB=1 swift test --filter GitHubSourceTests.testLiveGitHubDownloadAndStagedInstall
-```
-
-接口依据：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases)、[Release Assets API](https://docs.github.com/en/rest/releases/assets)。
-
-## 环境与编译
-
-- macOS 14 Sonoma 或更高，Apple Silicon / Intel。
-- Xcode 15 或更高，包含 macOS SDK、Swift 5.9+。不需要第三方依赖或开发者付费账号。
-- 打开 `AzerothManager.xcodeproj`，选择 **AzerothManager → My Mac**，按 **⌘R**。
-- 工程使用本目录的 Swift Package `ManagerCore`，请保留完整目录结构。第一次打开等待本地包解析完成。
-- 默认本机临时签名（`CODE_SIGN_IDENTITY = -`），未启用 App Sandbox，以便管理用户选择的游戏目录；未制作发行签名、公证、DMG 或 App Store 包。
-- 如果本机签名设置不同，可在 Signing & Capabilities 中改为 Sign to Run Locally，或选择自己的 Team。
-
-命令行编译（先切换到本工程根目录）：
-
-```sh
-xcodebuild -project AzerothManager.xcodeproj -scheme AzerothManager \
-  -configuration Debug -destination 'platform=macOS' \
-  -derivedDataPath DerivedData CODE_SIGNING_ALLOWED=NO build
-open DerivedData/Build/Products/Debug/AzerothManager.app
-```
-
-本机可运行构建建议使用 Xcode 的 ⌘R；上面的无签名构建主要用于验证编译。
-
-核心测试独立于 GUI，从工程根目录运行：
+在工程根目录执行：
 
 ```sh
 swift test
+xcodebuild -project AzerothManager.xcodeproj -scheme AzerothManager \
+  -configuration Release -destination 'generic/platform=macOS' \
+  -derivedDataPath DerivedData 'ARCHS=arm64 x86_64' \
+  ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY=- build
+open DerivedData/Build/Products/Release/AzerothManager.app
 ```
 
-Xcode 应用 scheme 没有挂载测试目标；测试位于 Swift Package 中。可以单独在 Xcode 打开 `Package.swift` 运行包测试，或使用上面的命令。
+Swift Package 测试独立于应用 scheme。默认不访问真实游戏目录、不读取真实 API Key；联网测试默认跳过。详情见 `VALIDATION.md`。
 
-## 先用演示目录试运行
+## 演示与限制
 
-1. 启动应用，点击「选择游戏目录」，选择随附的 `Demo/World of Warcraft`。
-2. 从候选目录中选择 `TimeDemo/Interface/AddOns`，标记「国服时光服」。`TimeDemo` 只是演示名称，不是国服真实目录名。
-3. 列表应显示「艾泽拉斯，你好」，版本 1.0.0。
-4. 导入 `Demo/HelloAzeroth-2.0.zip`，确认将覆盖 HelloAzeroth；安装后版本应变为 2.0.0。
-5. 在「备份与恢复」恢复安装前快照，应回到 1.0.0。
-6. 选择插件，卸载，检查列表，再恢复快照。
-7. 选择 `_retail_/Interface/AddOns` 并标记「正式服」，验证目录切换。
+随附 `Demo/World of Warcraft` 和 `Demo/HelloAzeroth-2.0.zip` 可试验导入、卸载、备份恢复。演示插件没有 CurseForge 来源，应显示「未识别来源」；演示接口号仅作占位，不应安装到真实客户端。
 
-演示文件接口号 `000000` 是占位值，仅用于本地流程检查；不应安装进真实客户端。
+通用二进制包含 Apple Silicon / Intel，Intel 未在实机验证。尚未验证断电、磁盘耗尽、并发外部写入的所有组合；当前没有自动依赖安装、自动清理弃用目录或设置云同步。
 
-## 管理真实游戏
-
-先退出游戏，并停止其他插件管理器。应用会按运行应用名称尝试检测魔兽世界，但不能保证识别所有启动方式，因此仍应手动确认游戏退出。
-
-可以选择游戏根目录、客户端目录或现有的 `Interface/AddOns`。扫描候选范围为所选目录及其下一层目录；特殊目录布局请直接选择 `Interface/AddOns`。如果 AddOns 不存在，请先运行游戏一次或手动创建。不根据 `_classic_` 等目录名武断认定时光服；请按战网实际启动路径确认。应用记住上次选择的路径与用途标记。
-
-插件列表支持中文名称、文件夹、版本、作者、说明、接口版本与依赖。TOC 读取 UTF-8（含 BOM）和 GB18030；优先中文 `Title-zhCN` / `Notes-zhCN`。TOC 必须与文件夹同名，或以「文件夹名_」开头。正式服优先 `_Mainline.toc`；时光服优先通用 `.toc`，否则按名称选择。多个专用 TOC 的判断是有限启发式，所选和其他 TOC 文件名会显示在详情；**不宣称正确识别所有时光服专用格式，也不保证插件适配**。一个无法解码的 TOC 会让本次扫描报错，避免静默漏报。
-
-导入支持插件目录直接打包、多个插件及常见外层目录包装。按完整文件夹替换，旧版残留文件会移除。不扫描或执行 Lua/XML；不会更改游戏内启用状态。依赖仅展示，卸载不会自动连带处理依赖。对缺少匹配 TOC 的目录不作为插件安装；嵌套于某插件内的库作为其内容一起复制。
-
-## ZIP 安全边界
-
-自带受限 ZIP 读取器，使用系统 zlib 解压，不调用 shell、不执行插件内容。
-
-- 支持 Stored / Deflate、UTF-8 文件名、单卷普通 ZIP。
-- 拒绝绝对路径、`..` / `.`、反斜杠、冒号、控制字符、空路径段、符号链接及其他 Unix 特殊文件。
-- 拒绝大小写/Unicode 规范化冲突、重复条目、文件与父目录冲突、重叠的文件记录、本地与中央文件名/方法不一致、CRC 不符。
-- 不支持加密、ZIP64、多卷或传统非 UTF-8 中文文件名；请重新以 UTF-8 ZIP 打包。
-- 压缩包 ≤256 MiB，解压总量 ≤1 GiB，单文件 ≤128 MiB，最多 20,000 条，路径 ≤32 层，插件搜索 ≤8 层。
-- 解压先进入随机临时目录，确认后才修改 AddOns。取消或失败会清理临时目录。安装前会再次检查链接。
-- 拒绝目标路径及插件树中的符号链接。不支持链接式插件布局。
-
-这些检查不等同于恶意插件检测。来自可信渠道的插件仍需要在游戏内确认其行为和兼容性。第一版使用内存缓冲单文件解压，接近限制的包可能占用数百 MB 内存；文件操作在后台执行。
-
-## 备份、事务与异常恢复
-
-默认备份位置：
-
-`~/Library/Application Support/AzerothManager/Backups/<UUID>/`
-
-每份包含 `snapshot.json` 和完整 `AddOns`。手动备份、安装前、卸载前、恢复前都会保存快照；备份失败即停止修改。只在当前目标目录下展示其对应快照。
-
-**不包含 WTF、SavedVariables、账号资料或游戏文件。** 恢复时整体替换 AddOns，快照后新增的插件会移除；WTF 保持现状。设置恢复需要用户另行管理。备份不自动清理，可在 Finder 中删除确定不需要的整个 UUID 文件夹。
-
-变更先在 Interface 下建立 `.Azeroth-next-<UUID>` 的完整副本，完成后把现有 AddOns 改名为 `.Azeroth-old-<UUID>`，再把新副本改名为 AddOns；提交失败会尝试回滚。操作可能需要「当前插件两份副本 + 一个完整备份」的额外磁盘空间，不提前承诺剩余容量足够；磁盘错误会报错并停止。
-
-两次目录改名不是断电安全的单一事务；应用崩溃、系统断电或外部程序同时写入仍可能留下中间状态。第一版不做自动崩溃恢复。若 AddOns 缺失：退出游戏和管理器，在 Interface 中检查 `.Azeroth-old-*`，确认时间和内容后手动重命名为 AddOns；或从备份目录完整复制 AddOns 回原处。`.Azeroth-next-*` 是尚未提交的副本。**先保留全部相关文件再处理，不要混合多个快照。** 常规成功操作后旧副本会被清理；清理失败可能留有隐藏目录。
-
-## 工程结构
-
-- `App/AzerothManagerApp.swift`：SwiftUI 深色中文 UI、目录选择、确认对话框与串行后台操作。
-- `Sources/ManagerCore`：TOC、扫描、安全 ZIP、安装预览、快照与事务。
-- `Sources/ZipInflate`：系统 zlib 的小型 C 封装，严格检查输入/输出长度。
-- `Tests/ManagerCoreTests`：元数据、目录、链接、ZIP、安装、卸载、恢复、失败回滚与更新占位测试。
-- `Demo`：独立演示目录及真实 Deflate ZIP。
-- `VALIDATION.md`：交付时实际验证情况。
-
-GitHub 实现位于 `Sources/ManagerCore/GitHubSource.swift`。原 `UpdateProvider` / `UnavailableUpdateProvider` 保留为未接入平台的扩展占位，不用于 GitHub 工作流。CurseForge 实现位于 `Sources/ManagerCore/CurseForgeSource.swift`，包含钥匙串、API、下载校验与独立来源记录。
+接口依据：[CurseForge 官方 REST API](https://docs.curseforge.com/rest-api/)。

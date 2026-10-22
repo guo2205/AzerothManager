@@ -67,12 +67,14 @@ public final class Library {
         } catch { try? fm.removeItem(at: staging); throw error }
     }
     public func discard(_ preview: InstallPreview) { try? fm.removeItem(at: preview.staging) }
-    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil) throws {
+    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil, expected: [String: String] = [:]) throws {
         guard source == nil || curseForge == nil else { throw ManagerError("只能记录一个安装来源") }
+        try InstalledUpdates.verify(expected, target: target)
         try FileSafety.checkTree(preview.staging)
         let cfReceipt = try curseForge.map { try CFReceipt(selection: $0, folders: preview.folders) }
         let receipt = try source.map { try SourceReceipt(selection: $0, folders: preview.folders) }
         try mutate(target, reason: "安装 ZIP 前") { next in
+            try InstalledUpdates.verify(expected, target: next)
             for folder in preview.folders {
                 let key = folder.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
                 for existing in try self.fm.contentsOfDirectory(at: next, includingPropertiesForKeys: nil) where existing.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == key { try self.fm.removeItem(at: existing) }
