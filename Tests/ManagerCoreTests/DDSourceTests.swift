@@ -46,6 +46,38 @@ final class DDSourceTests: XCTestCase {
         XCTAssertEqual(page.result?.first?.latest_version?.version, "2.0")
         XCTAssertEqual(DDClient.gameType(.retail), 10001)
     }
+    private func requestJSON(_ request: URLRequest) throws -> [String: Any] {
+        var data = request.httpBody ?? Data()
+        if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }; data.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+    func testPopularUsesEmptySearchAndSelectedRankingAndPagination() async throws {
+        for sort in DDSort.allCases {
+            DDStub.handler = { request in
+                let body = try self.requestJSON(request)
+                XCTAssertEqual(body["name"] as? String, "")
+                XCTAssertEqual(body["origin"] as? String, "all")
+                XCTAssertEqual(body["sort_type"] as? Int, sort.rawValue)
+                XCTAssertEqual(body["game_type"] as? Int, 10001)
+                XCTAssertEqual(body["page"] as? Int, 2)
+                XCTAssertEqual(body["size"] as? Int, 20)
+                return (200, try self.json(["code": 0, "count": 0, "result": []]))
+            }
+            _ = try await client().search("", gameType: 10001, page: 2, sort: sort)
+        }
+        XCTAssertEqual(DDSort.weekly.rawValue, 4)
+        let addon = try JSONDecoder().decode(DDAddon.self, from: json(["sn": "a", "name": "示例", "week_download": 20, "month_download": 50, "total_download": 100]))
+        XCTAssertEqual(addon.downloads(for: .weekly), 20)
+        XCTAssertEqual(addon.downloads(for: .monthly), 50)
+        XCTAssertEqual(addon.downloads(for: .total), 100)
+    }
     func testFailedAPIIsNotAnEmptySuccess() async throws {
         DDStub.handler = { _ in (200, Data("{\"code\":403,\"msg\":\"需要登录\"}".utf8)) }
         do { _ = try await client().scan(tocs: [:], flavor: .time); XCTFail("Expected failure") } catch { XCTAssertTrue(error.localizedDescription.contains("需要登录")) }
@@ -80,7 +112,7 @@ final class DDSourceTests: XCTestCase {
         let addons = try AddonScanner.scan(root, flavor: .time)
         DDStub.handler = { _ in (200, try self.scanResponse([self.package(installed: "new")])) }
         let current = try await client().check(target: root, addons: addons, flavor: .time)
-        XCTAssertEqual(current["Example"]?.label, "已是最新 · DD（TOC）"); XCTAssertNil(current["Example"]?.ddSelection)
+        XCTAssertEqual(current["Example"]?.label, "已是最新 · DD（TOC）"); XCTAssertEqual(current["Example"]?.isCurrent, true); XCTAssertNil(current["Example"]?.ddSelection)
         DDStub.handler = { _ in (200, try self.scanResponse([self.package()])) }
         let old = try await client().check(target: root, addons: addons, flavor: .time)
         DDStub.handler = { _ in (200, try self.scanResponse([self.package(file: "newer")])) }
@@ -153,16 +185,25 @@ final class DDSourceTests: XCTestCase {
     }
     func testLiveDDDownloadAndInstallOnTemporaryCopy() async throws {
         guard ProcessInfo.processInfo.environment["AZEROTH_DD_LIVE_TEST"] == "1" else { throw XCTSkip("Explicit live test only") }
-        let originalRoot = URL(fileURLWithPath: "/Applications/World of Warcraft/_classic_titan_/Interface/AddOns")
-        let titan = try FileManager.default.contentsOfDirectory(atPath: originalRoot.path).filter { $0.hasPrefix("TitanBistooltip") }.sorted()
-        XCTAssertGreaterThan(titan.count, 1)
-        for names in [["!BugGrabber"], titan] {
+        // 固定公开旧版本作为测试种子，不读取或修改用户的游戏插件。
+        let seeds: [(String, String, String, Int)] = [
+            ("52a6a9589c9c46988d200373ae2f25d9", "v12.1.0", "https://uires.w.163.com/file/52a6a9589c9c46988d200373ae2f25d9/!BugGrabber-v12.1.0.zip", 11093),
+            ("b5ba1d2daddf4a2988e1367889799bb9", "3.90", "https://uires.w.163.com/file/addon/o4hU8oN8waeQZyfrBkqecf4O7PU52uF2/addon.zip", 1074004)
+        ]
+        for (fileID, version, url, size) in seeds {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let target = root.appendingPathComponent("Interface/AddOns")
             try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-            for name in names { try FileManager.default.copyItem(at: originalRoot.appendingPathComponent(name), to: target.appendingPathComponent(name)) }
             let client = DDClient(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
+            var seed = package(file: fileID, url: url, size: size)
+            var seedVersion = try XCTUnwrap(seed["latest_version"] as? [String: Any]); seedVersion["version"] = version
+            seed["latest_version"] = seedVersion
+            let seedSelection = try DDSelection(package: JSONDecoder().decode(DDScanPackage.self, from: json(seed)), flavor: .time)
+            let oldArchive = try await client.download(seedSelection); defer { try? FileManager.default.removeItem(at: oldArchive) }
+            let oldPreview = try library.prepare(oldArchive, target: target, flavor: .time); defer { library.discard(oldPreview) }
+            let names = oldPreview.folders.map(\.lastPathComponent).sorted()
+            for folder in oldPreview.folders { try FileManager.default.copyItem(at: folder, to: target.appendingPathComponent(folder.lastPathComponent)) }
             let addons = try AddonScanner.scan(target, flavor: .time)
             let items = try await client.check(target: target, addons: addons, flavor: .time)
             let update = try XCTUnwrap(items[names[0]]), selection = try XCTUnwrap(update.ddSelection)

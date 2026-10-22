@@ -1,12 +1,25 @@
 import Foundation
 import CryptoKit
 
+public enum DDSort: Int, CaseIterable, Identifiable, Sendable {
+    case weekly = 4, monthly = 3, total = 1
+    public var id: Int { rawValue }
+    public var rawTitle: String { switch self { case .weekly: return "周热门"; case .monthly: return "月热门"; case .total: return "总下载量" } }
+    public var downloadTitle: String { switch self { case .weekly: return "周下载"; case .monthly: return "月下载"; case .total: return "总下载" } }
+}
+
 public struct DDAddon: Decodable, Identifiable, Sendable {
     public let sn: String
     public let name: String
     public let description: String?
     public let game_types: [Int]?
     public let latest_version: Version?
+    public let week_download: Int?
+    public let month_download: Int?
+    public let total_download: Int?
+    public func downloads(for sort: DDSort) -> Int? {
+        switch sort { case .weekly: return week_download; case .monthly: return month_download; case .total: return total_download }
+    }
     public var id: String { sn }
     public struct Version: Codable, Sendable {
         public let sn: String
@@ -59,6 +72,7 @@ final class DDRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Senda
 }
 /// Implements the official public TOC-MD5 scan protocol. No credentials or Lua source are uploaded.
 public struct DDClient: Sendable {
+    public static let maxArchiveBytes = 256 * 1024 * 1024
     private let session: URLSession
     public init(configuration: URLSessionConfiguration = .ephemeral) {
         configuration.timeoutIntervalForRequest = 30; configuration.timeoutIntervalForResource = 300
@@ -84,8 +98,8 @@ public struct DDClient: Sendable {
         guard let response = response as? HTTPURLResponse, response.statusCode == 200, data.count <= 16 * 1024 * 1024 else { throw ManagerError("DD 查询失败，请稍后重试") }
         return data
     }
-    public func search(_ query: String, gameType: Int, page: Int = 1) async throws -> DDPage {
-        let r = try request("addon/addon_list", body: ["game_type": gameType, "origin": "all", "name": query, "page": max(1, page), "size": 20])
+    public func search(_ query: String, gameType: Int, page: Int = 1, sort: DDSort = .weekly) async throws -> DDPage {
+        let r = try request("addon/addon_list", body: ["game_type": gameType, "origin": "all", "name": query, "page": max(1, page), "size": 20, "sort_type": sort.rawValue])
         let result = try JSONDecoder().decode(DDPage.self, from: await data(r))
         guard result.code == 0, result.result != nil else { throw ManagerError(result.msg ?? "DD 接口没有返回插件列表") }
         return result
@@ -115,7 +129,7 @@ public struct DDClient: Sendable {
             let folders = addons.map { target.appendingPathComponent($0.folder) }
             let tocs = try Self.tocs(in: folders)
             var fingerprints: [String: String] = [:]
-            for folder in folders { try Task.checkCancellation(); fingerprints[folder.lastPathComponent] = try SourceTracking.fingerprint(folder) }
+            for folder in folders { try Task.checkCancellation(); fingerprints[folder.lastPathComponent] = try AddonFingerprint.fingerprint(folder) }
             return (tocs, fingerprints, try DDTracking.receipts(in: target))
         }.value
         let scanned = try await scan(tocs: local.0, flavor: flavor)
@@ -137,8 +151,8 @@ public struct DDClient: Sendable {
             else if !unchanged { label = "本地有修改 · DD" }
             else if package.detail_sn == latest.sn { label = "已是最新 · DD（TOC）" }
             else { label = "DD 版本可更新" }
-            let downloadable = complete && latest.release_type == 1 && latest.size.map { $0 > 0 && $0 <= GitHubClient.maxArchiveBytes } == true && latest.file_path.flatMap(URL.init(string:)).map(DDRedirectPolicy.allowsCDN) == true && package.need_buy != true && package.need_anchor_vip != true
-            result[addon.folder] = InstalledUpdate(label: label, latest: latest.version, expected: local.1, externalURL: Self.website(sn: package.sn, gameType: Self.gameType(flavor)), ddSelection: downloadable && (package.detail_sn != latest.sn || !unchanged) ? try DDSelection(package: package, flavor: flavor) : nil)
+            let downloadable = complete && latest.release_type == 1 && latest.size.map { $0 > 0 && $0 <= Self.maxArchiveBytes } == true && latest.file_path.flatMap(URL.init(string:)).map(DDRedirectPolicy.allowsCDN) == true && package.need_buy != true && package.need_anchor_vip != true
+            result[addon.folder] = InstalledUpdate(label: label, latest: latest.version, expected: local.1, externalURL: Self.website(sn: package.sn, gameType: Self.gameType(flavor)), ddSelection: downloadable && (package.detail_sn != latest.sn || !unchanged) ? try DDSelection(package: package, flavor: flavor) : nil, isCurrent: complete && unchanged && package.detail_sn == latest.sn)
         }
         return result
     }
@@ -157,7 +171,7 @@ public struct DDClient: Sendable {
     public func download(_ selection: DDSelection) async throws -> URL {
         let version = selection.version
         guard selection.package.match_degree == "all", selection.package.local_status == 0, selection.package.need_buy != true, selection.package.need_anchor_vip != true, version.release_type == 1,
-              let size = version.size, size > 0, size <= GitHubClient.maxArchiveBytes, let text = version.file_path, let url = URL(string: text), DDRedirectPolicy.allowsCDN(url) else { throw ManagerError("DD 未提供可用的正式版下载地址") }
+              let size = version.size, size > 0, size <= Self.maxArchiveBytes, let text = version.file_path, let url = URL(string: text), DDRedirectPolicy.allowsCDN(url) else { throw ManagerError("DD 未提供可用的正式版下载地址") }
         let (stream, response) = try await session.bytes(for: URLRequest(url: url))
         defer { stream.task.cancel() }
         guard let response = response as? HTTPURLResponse, response.statusCode == 200, response.url.map(DDRedirectPolicy.allowsCDN) == true,
@@ -197,7 +211,7 @@ public struct DDReceipt: Codable, Sendable {
     init(selection: DDSelection, folders: [URL]) throws {
         projectID = selection.package.sn; fileID = selection.version.sn; version = selection.version.version; flavor = selection.flavor
         self.folders = folders.map(\.lastPathComponent)
-        fingerprints = try Dictionary(uniqueKeysWithValues: folders.map { ($0.lastPathComponent, try SourceTracking.fingerprint($0)) })
+        fingerprints = try Dictionary(uniqueKeysWithValues: folders.map { ($0.lastPathComponent, try AddonFingerprint.fingerprint($0)) })
     }
 }
 public enum DDTracking {

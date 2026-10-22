@@ -90,12 +90,3 @@ public enum FileSafety {
         }
     }
 }
-
-public struct UpdateCandidate: Sendable { public let folder: String; public let version: String }
-public protocol UpdateProvider: Sendable {
-    func checkUpdates() async throws -> [UpdateCandidate]
-}
-public struct UnavailableUpdateProvider: UpdateProvider {
-    public init() {}
-    public func checkUpdates() async throws -> [UpdateCandidate] { throw ManagerError("在线更新尚未实现；请手动导入可信来源的 ZIP。") }
-}

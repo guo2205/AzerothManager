@@ -129,8 +129,4 @@ final class ManagerCoreTests: XCTestCase {
         mismatch[30] = UInt8(ascii: "X")
         XCTAssertThrowsError(try extract(mismatch))
     }
-    func testOnlineUpdatesExplicitlyUnavailable() async throws {
-        do { _ = try await UnavailableUpdateProvider().checkUpdates(); XCTFail("Should not claim update support") }
-        catch { XCTAssertTrue(error.localizedDescription.contains("尚未实现")) }
-    }
 }

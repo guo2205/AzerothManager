@@ -15,5 +15,5 @@ for archive in outputs/AzerothManager-v*.app.zip(N); do rm -- "$archive"; done
 if [[ -f ../AzerothManager-macOS.app.zip ]]; then rm -- ../AzerothManager-macOS.app.zip; fi
 # Preserve one canonical distribution bundle; Xcode can rebuild its product next run.
 rm -rf -- "$built"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent outputs/AzerothManager.app outputs/AzerothManager-v0.6.app.zip
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent outputs/AzerothManager.app outputs/AzerothManager-v0.7.app.zip
 open "$PWD/outputs/AzerothManager.app"

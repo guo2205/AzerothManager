@@ -67,8 +67,7 @@ public final class Library {
         } catch { try? fm.removeItem(at: staging); throw error }
     }
     public func discard(_ preview: InstallPreview) { try? fm.removeItem(at: preview.staging) }
-    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil, expected: [String: String] = [:], dd: DDSelection? = nil) throws {
-        guard [source != nil, curseForge != nil, dd != nil].filter({ $0 }).count <= 1 else { throw ManagerError("只能记录一个安装来源") }
+    public func install(_ preview: InstallPreview, target: URL, expected: [String: String] = [:], dd: DDSelection? = nil) throws {
         try InstalledUpdates.verify(expected, target: target)
         try FileSafety.checkTree(preview.staging)
         let ddReceipt = try dd.map { try DDReceipt(selection: $0, folders: preview.folders) }
@@ -81,8 +80,6 @@ public final class Library {
             guard newKeys.isDisjoint(with: existing) else { throw ManagerError("检查后出现了新插件目录，请重新检查更新") }
         }
         try verifyNewDDDestinations(target)
-        let cfReceipt = try curseForge.map { try CFReceipt(selection: $0, folders: preview.folders) }
-        let receipt = try source.map { try SourceReceipt(selection: $0, folders: preview.folders) }
         try mutate(target, reason: "安装 ZIP 前") { next in
             try InstalledUpdates.verify(expected, target: next)
             try verifyNewDDDestinations(next)
@@ -91,12 +88,6 @@ public final class Library {
                 for existing in try self.fm.contentsOfDirectory(at: next, includingPropertiesForKeys: nil) where existing.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == key { try self.fm.removeItem(at: existing) }
                 try self.fm.copyItem(at: folder, to: next.appendingPathComponent(folder.lastPathComponent))
             }
-            var records = SourceTracking.removing(preview.folders.map(\.lastPathComponent), from: try SourceTracking.receipts(in: next))
-            if let receipt { records.append(receipt) }
-            try SourceTracking.write(records, to: next)
-            var cfRecords = CFTracking.removing(preview.folders.map(\.lastPathComponent), from: try CFTracking.receipts(in: next))
-            if let cfReceipt { cfRecords.append(cfReceipt) }
-            try CFTracking.write(cfRecords, to: next)
             var ddRecords = DDTracking.removing(preview.folders.map(\.lastPathComponent), from: try DDTracking.receipts(in: next))
             if let ddReceipt { ddRecords.append(ddReceipt) }
             try DDTracking.write(ddRecords, to: next)
@@ -106,8 +97,6 @@ public final class Library {
         guard !folders.isEmpty, folders.allSatisfy({ !$0.isEmpty && !$0.contains("/") && !$0.contains("\\") && $0 != "." && $0 != ".." }) else { throw ManagerError("插件名称无效") }
         try mutate(target, reason: "卸载前：" + folders.joined(separator: "、")) { next in
             for folder in folders { try self.fm.removeItem(at: next.appendingPathComponent(folder)) }
-            try SourceTracking.write(SourceTracking.removing(folders, from: SourceTracking.receipts(in: next)), to: next)
-            try CFTracking.write(CFTracking.removing(folders, from: CFTracking.receipts(in: next)), to: next)
             try DDTracking.write(DDTracking.removing(folders, from: DDTracking.receipts(in: next)), to: next)
         }
     }

@@ -15,3 +15,5 @@ The user explicitly requests that every completed code update be committed and p
 - GitHub synchronization does not update files uploaded to ChatGPT Projects automatically.
 
 - Preview only the newest built application. Close older AzerothManager instances and remove obsolete project-generated app bundles and versioned distribution ZIPs after the latest build passes validation. Preserve game files, user settings, and backups. Use `scripts/run-latest.sh` for this workflow.
+
+- Git 提交标题、提交正文及新增 Git 标签说明统一使用中文；发布更新时同样使用中文说明。保留已有共享提交历史，不重写远程历史。
