@@ -67,14 +67,25 @@ public final class Library {
         } catch { try? fm.removeItem(at: staging); throw error }
     }
     public func discard(_ preview: InstallPreview) { try? fm.removeItem(at: preview.staging) }
-    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil, expected: [String: String] = [:]) throws {
-        guard source == nil || curseForge == nil else { throw ManagerError("只能记录一个安装来源") }
+    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil, expected: [String: String] = [:], dd: DDSelection? = nil) throws {
+        guard [source != nil, curseForge != nil, dd != nil].filter({ $0 }).count <= 1 else { throw ManagerError("只能记录一个安装来源") }
         try InstalledUpdates.verify(expected, target: target)
         try FileSafety.checkTree(preview.staging)
+        let ddReceipt = try dd.map { try DDReceipt(selection: $0, folders: preview.folders) }
+        func verifyNewDDDestinations(_ directory: URL) throws {
+            guard dd != nil else { return }
+            func key(_ name: String) -> String { name.precomposedStringWithCanonicalMapping.lowercased() }
+            let expectedKeys = Set(expected.keys.map(key))
+            let newKeys = Set(preview.folders.map { key($0.lastPathComponent) }).subtracting(expectedKeys)
+            let existing = Set(try fm.contentsOfDirectory(atPath: directory.path).map(key))
+            guard newKeys.isDisjoint(with: existing) else { throw ManagerError("检查后出现了新插件目录，请重新检查更新") }
+        }
+        try verifyNewDDDestinations(target)
         let cfReceipt = try curseForge.map { try CFReceipt(selection: $0, folders: preview.folders) }
         let receipt = try source.map { try SourceReceipt(selection: $0, folders: preview.folders) }
         try mutate(target, reason: "安装 ZIP 前") { next in
             try InstalledUpdates.verify(expected, target: next)
+            try verifyNewDDDestinations(next)
             for folder in preview.folders {
                 let key = folder.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
                 for existing in try self.fm.contentsOfDirectory(at: next, includingPropertiesForKeys: nil) where existing.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == key { try self.fm.removeItem(at: existing) }
@@ -86,6 +97,9 @@ public final class Library {
             var cfRecords = CFTracking.removing(preview.folders.map(\.lastPathComponent), from: try CFTracking.receipts(in: next))
             if let cfReceipt { cfRecords.append(cfReceipt) }
             try CFTracking.write(cfRecords, to: next)
+            var ddRecords = DDTracking.removing(preview.folders.map(\.lastPathComponent), from: try DDTracking.receipts(in: next))
+            if let ddReceipt { ddRecords.append(ddReceipt) }
+            try DDTracking.write(ddRecords, to: next)
         }
     }
     public func uninstall(_ folders: [String], target: URL) throws {
@@ -94,6 +108,7 @@ public final class Library {
             for folder in folders { try self.fm.removeItem(at: next.appendingPathComponent(folder)) }
             try SourceTracking.write(SourceTracking.removing(folders, from: SourceTracking.receipts(in: next)), to: next)
             try CFTracking.write(CFTracking.removing(folders, from: CFTracking.receipts(in: next)), to: next)
+            try DDTracking.write(DDTracking.removing(folders, from: DDTracking.receipts(in: next)), to: next)
         }
     }
     public func restore(_ snapshot: Snapshot, target: URL) throws {

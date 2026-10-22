@@ -75,7 +75,7 @@ struct Prompt: Identifiable {
         let query = ddQuery, type = DDClient.gameType(flavor)
         runNetwork("正在查询 DD 插件库…", operation: { try await DDClient().search(query, gameType: type, page: page) }) { result in
             self.ddPage = result; self.ddPageNumber = page
-            self.status = "DD 查询完成 · 下载请使用 DD 官方页面"
+            self.status = "DD 查询完成 · 已安装插件可在插件库直接更新"
         }
     }
     @Published var apiKeyInput = ""
@@ -148,7 +148,8 @@ struct Prompt: Identifiable {
                 guard self.target == target, self.flavor == flavor, self.useDD else { return }
                 self.installedUpdates = result
                 let matched = result.values.filter { $0.externalURL != nil }.count
-                self.status = "DD 检查完成 · 精确匹配 \(matched) 个文件夹 · 版本不同不代表一定较新，更新请前往 DD"
+                let updates = result.values.filter { $0.ddSelection != nil }.count
+                self.status = "DD 检查完成 · 匹配 \(matched) 个文件夹 · \(updates) 个文件夹可更新 · 更新前自动备份"
             }
             return
         }
@@ -167,7 +168,9 @@ struct Prompt: Identifiable {
         } catch { status = error.localizedDescription }
     }
     func updateInstalled(_ addon: Addon) {
-        guard let item = installedUpdates[addon.folder], let selection = item.selection else { return }
+        guard let item = installedUpdates[addon.folder] else { return }
+        if let dd = item.ddSelection { updateDD(addon, selection: dd, expected: item.expected); return }
+        guard let selection = item.selection else { return }
         do {
             let client = try cfClient()
             runNetwork("正在确认最新正式版…", operation: {
@@ -177,6 +180,28 @@ struct Prompt: Identifiable {
                 self.installSelection(CFSelection(mod: selection.mod, file: latest, typeID: selection.typeID, version: "", flavor: selection.flavor), expected: item.expected, requiredFolder: addon.folder)
             }
         } catch { self.error = error.localizedDescription }
+    }
+    func updateDD(_ addon: Addon, selection: DDSelection, expected: [String: String]) {
+        guard let target, selection.flavor == flavor, !busy, gameIsClosed() else { return }
+        let client = DDClient(), library = library, flavor = flavor
+        runNetwork("正在从 DD 下载并校验 \(selection.package.name)…", operation: {
+            let refreshed = try await client.refresh(selection, target: target, expected: expected)
+            let archive = try await client.download(refreshed)
+            defer { try? FileManager.default.removeItem(at: archive) }
+            let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
+            do {
+                try Task.checkCancellation()
+                guard preview.folders.contains(where: { $0.lastPathComponent == addon.folder }) else { throw ManagerError("DD 新版缺少所选插件目录，已停止安装") }
+                try await client.verify(preview, selection: refreshed)
+                return preview
+            } catch { library.discard(preview); throw error }
+        }) { preview in
+            guard self.target == target, self.flavor == flavor, self.useDD, self.gameIsClosed() else { library.discard(preview); return }
+            self.run("正在自动备份并安装 DD 插件…", operation: {
+                defer { library.discard(preview) }
+                try library.install(preview, target: target, expected: expected, dd: selection)
+            }) { self.refresh() }
+        }
     }
     func installPopular(_ mod: CFMod) {
         guard target != nil, cfTypeID > 0 else { error = "请先选择游戏目录与客户端分支"; return }
@@ -346,7 +371,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.5.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.6.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -449,13 +474,13 @@ struct ContentView: View {
                     TableColumn("状态 / 操作") { addon in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.installedUpdates[addon.folder]?.label ?? "等待检查").font(.caption).lineLimit(2)
-                            if model.installedUpdates[addon.folder]?.selection != nil {
+                            if model.installedUpdates[addon.folder]?.selection != nil || model.installedUpdates[addon.folder]?.ddSelection != nil {
                                 Button { model.updateInstalled(addon) } label: {
                                     Label("更新", systemImage: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
                                         .padding(.horizontal, 12).padding(.vertical, 5).foregroundStyle(.black)
                                         .background(gold.gradient, in: Capsule())
                                 }.buttonStyle(.plain)
-                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.label != "版本号一致 · DD" {
+                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.label != "已是最新 · DD（TOC）" {
                                 Link(destination: url) {
                                     Label("前往 DD", systemImage: "arrow.up.right").font(.system(size: 11, weight: .semibold))
                                         .padding(.horizontal, 11).padding(.vertical, 5).foregroundStyle(gold)
@@ -472,7 +497,7 @@ struct ContentView: View {
                     }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
-            Label(model.useDD ? "DD 实时版本查询；公开接口未提供下载地址，请前往 DD 更新。版本号一致不代表代码完全一致。" : "自动识别并检查已安装插件；点击更新将备份并替换整个插件包。未识别来源不会被标记为最新。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            Label(model.useDD ? "通过 DD 官方扫描获取新版并直接更新，安装前自动备份。TOC 匹配不代表所有代码完全一致。" : "自动识别并检查已安装插件；点击更新将备份并替换整个插件包。未识别来源不会被标记为最新。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var backupView: some View {
@@ -515,7 +540,7 @@ struct ContentView: View {
     private var ddOnlineView: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("探索 DD 插件库").font(.title2.bold())
-            Text("查询所选客户端的实时版本。DD 公开接口没有提供下载地址，安装与更新请通过官方页面完成。").font(.caption).foregroundStyle(.secondary)
+            Text("查询所选客户端的实时版本。已安装插件在插件库中直接更新；新插件可通过 DD 官方页面安装。").font(.caption).foregroundStyle(.secondary)
             HStack {
                 TextField("搜索 DD 插件", text: $model.ddQuery).textFieldStyle(.roundedBorder).onSubmit { model.searchDD() }
                 Button("搜索") { model.searchDD() }
@@ -598,8 +623,8 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.5", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
-                Text("默认通过网易 DD 实时查询版本，无需密钥。公开接口暂不提供下载地址，安装和更新请前往 DD；也可切换 CurseForge 使用应用内更新。")
+                Label("艾泽拉斯插件管家 · v0.6", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Text("默认通过网易 DD 官方扫描查询并直接下载更新，无需密钥。更新前自动备份，下载后再次核对 TOC 版本与目录；也可切换 CurseForge。")
                 GroupBox("CurseForge 连接") {
                     VStack(alignment: .leading, spacing: 12) {
                         SecureField("API Key", text: $model.apiKeyInput).textFieldStyle(.roundedBorder)
@@ -614,7 +639,7 @@ struct ContentView: View {
                 }
                 Divider()
                 Text("自动检查与一键更新").font(.headline)
-                Text("每次启动、扫描或安装完成后自动检查。优先使用安装记录和 CurseForge 精确指纹识别本地插件，并读取 TOC 项目 ID 作为补充；无法可靠识别时显示“未识别来源”，不会假报最新。更新按钮直接安装所选客户端的最新正式版本，并自动保存完整 AddOns 备份。")
+                Text("每次启动、扫描或安装完成后自动检查。DD 使用 TOC 文件名和 MD5 扫描识别插件，并比较包版本 ID；不需要本地 DD 清单。点击更新会复查版本、下载网易 CDN ZIP、检查大小与 ZIP 完整性，再向 DD 核对解压后的 TOC 版本和目录，最后备份整个 AddOns 并安装。DD 未提供整个 ZIP 的密码学摘要，TOC 匹配也不等于所有代码完全一致。")
                 Text("请退出游戏后更新。一次更新可能替换同一插件包的多个文件夹，本地修改也会被替换；WTF 设置不会更改。检查后发生本地变更会中止安装，需重新检查。依赖暂不自动安装，未提供无人值守定时更新。")
                 Text("国服时光服默认匹配 WoW Wrath Titan Reforged，正式服匹配 WoW Retail。作者标记仍不能保证游戏内兼容。应用仅本机临时签名，尚无发行签名或公证。").font(.caption).foregroundStyle(.secondary)
             }.padding(.bottom, 12)

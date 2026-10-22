@@ -19,49 +19,164 @@ final class DDSourceTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [DDStub.self]
         return DDClient(configuration: config)
     }
-    func entry(_ id: String, folder: String = "Example", game: Int = 2) -> [String: Any] {
-        ["sn": id, "name": "Example", "game_types": [game], "latest_version": ["sn": "file-new", "version": "2.0", "release_type": 1, "folders": [folder], "file_path": ""]]
+    func json(_ object: Any) throws -> Data { try JSONSerialization.data(withJSONObject: object) }
+    func package(id: String = "known", file: String = "new", installed: String = "old", degree: String = "all", status: Int = 0, url: String = "https://uires.w.163.com/file/addon/example/addon.zip", size: Int = 10) -> [String: Any] {
+        ["sn": id, "name": "Example", "folders": ["Example"], "detail_sn": installed, "local_version": "1.0", "match_degree": degree, "local_status": status,
+         "latest_version": ["sn": file, "version": "2.0", "release_type": 1, "file_path": url, "size": size]]
     }
-    func response(_ entries: [[String: Any]]) throws -> Data { try JSONSerialization.data(withJSONObject: ["code": 0, "count": entries.count, "result": entries]) }
-    func testPublicSearchAndNoCredentials() async throws {
-        DDStub.handler = { request in
-            XCTAssertEqual(request.url?.host, "uiapi.w.163.com")
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
-            XCTAssertNil(request.value(forHTTPHeaderField: "x-api-key"))
-            return (200, try self.response([self.entry("one")]))
+    func scanResponse(_ entries: [[String: Any]]) throws -> Data { try json(["code": 0, "result": ["installed": entries, "unknown": []]]) }
+    func target() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("Interface/AddOns")
+        let folder = root.appendingPathComponent("Example")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("## Title: Example\n## Version: 1.0\nCode.lua".utf8).write(to: folder.appendingPathComponent("Example.toc"))
+        try Data("local x=1".utf8).write(to: folder.appendingPathComponent("Code.lua"))
+        return root
+    }
+    func testPublicSearchHasOfficialParametersAndNoCredentials() async throws {
+        DDStub.handler = { r in
+            XCTAssertEqual(r.url?.host, "uiapi.w.163.com"); XCTAssertEqual(r.httpMethod, "POST")
+            let query = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)!.queryItems!
+            XCTAssertEqual(Set(query.map(\.name)), Set(["ef", "uf", "ts", "ab"]))
+            XCTAssertTrue(query.allSatisfy { $0.value == "0" })
+            XCTAssertNil(r.value(forHTTPHeaderField: "Authorization")); XCTAssertNil(r.value(forHTTPHeaderField: "Cookie"))
+            return (200, try self.json(["code": 0, "count": 1, "result": [self.package()]]))
         }
         let page = try await client().search("中文 & +", gameType: 2)
         XCTAssertEqual(page.result?.first?.latest_version?.version, "2.0")
         XCTAssertEqual(DDClient.gameType(.retail), 10001)
-        XCTAssertEqual(DDClient.gameType(.time), 2)
     }
     func testFailedAPIIsNotAnEmptySuccess() async throws {
         DDStub.handler = { _ in (200, Data("{\"code\":403,\"msg\":\"需要登录\"}".utf8)) }
-        do { _ = try await client().search("Example", gameType: 2); XCTFail("Expected failure") } catch { XCTAssertTrue(error.localizedDescription.contains("需要登录")) }
+        do { _ = try await client().scan(tocs: [:], flavor: .time); XCTFail("Expected failure") } catch { XCTAssertTrue(error.localizedDescription.contains("需要登录")) }
     }
-    func testExactMappingAmbiguityWrongBranchAndStaleCache() async throws {
+    func testScanUsesTOCMD5AndFindsUpdateWithoutCachedStrategy() async throws {
+        let root = try target(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let hash = try DDClient.tocs(in: [root.appendingPathComponent("Example")])
+        XCTAssertEqual(hash.keys.sorted(), ["Example/Example.toc"])
+        XCTAssertEqual(hash.values.first?.count, 32)
+        DDStub.handler = { r in
+            XCTAssertEqual(r.url?.path, "/addon/scan")
+            return (200, try self.scanResponse([self.package()]))
+        }
+        let result = try await client().check(target: root, addons: AddonScanner.scan(root, flavor: .time), flavor: .time)
+        let item = try XCTUnwrap(result["Example"])
+        XCTAssertEqual(item.label, "DD 版本可更新"); XCTAssertEqual(item.latest, "2.0"); XCTAssertNotNil(item.ddSelection)
+        try Data("local changed=2".utf8).write(to: root.appendingPathComponent("Example/Code.lua"))
+        do { _ = try await client().refresh(try XCTUnwrap(item.ddSelection), target: root, expected: item.expected); XCTFail("Expected changed-file refusal") } catch { XCTAssertTrue(error.localizedDescription.contains("变化")) }
+    }
+    func testPartialOrAmbiguousMatchCannotUpdate() async throws {
+        let root = try target(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let addons = try AddonScanner.scan(root, flavor: .time)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(degree: "part", status: 1)])) }
+        let partial = try await client().check(target: root, addons: addons, flavor: .time)
+        XCTAssertNil(partial["Example"]?.ddSelection)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(id: "one"), self.package(id: "two")])) }
+        let ambiguous = try await client().check(target: root, addons: addons, flavor: .time)
+        XCTAssertEqual(ambiguous["Example"]?.label, "DD 匹配冲突"); XCTAssertNil(ambiguous["Example"]?.ddSelection)
+    }
+    func testFileIdentityDeterminesLatestAndReleaseChangesAbort() async throws {
+        let root = try target(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let addons = try AddonScanner.scan(root, flavor: .time)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(installed: "new")])) }
+        let current = try await client().check(target: root, addons: addons, flavor: .time)
+        XCTAssertEqual(current["Example"]?.label, "已是最新 · DD（TOC）"); XCTAssertNil(current["Example"]?.ddSelection)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package()])) }
+        let old = try await client().check(target: root, addons: addons, flavor: .time)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(file: "newer")])) }
+        do { _ = try await client().refresh(try XCTUnwrap(old["Example"]?.ddSelection), target: root, expected: old["Example"]!.expected); XCTFail("Expected changed-release refusal") } catch { XCTAssertTrue(error.localizedDescription.contains("版本发生变化")) }
+    }
+    func testCDNAllowlist() {
+        XCTAssertTrue(DDRedirectPolicy.allowsCDN(URL(string: "https://uires.w.163.com/file/addon/test/addon.zip")!))
+        for text in ["http://uires.w.163.com/file/a.zip", "https://uires.w.163.com.evil.test/file/a.zip", "https://user@uires.w.163.com/file/a.zip", "https://uires.w.163.com:443/file/a.zip", "https://uires.w.163.com/other/a.zip", "https://uires.w.163.com/file/a.zip?token=x"] {
+            XCTAssertFalse(DDRedirectPolicy.allowsCDN(URL(string: text)!), text)
+        }
+    }
+    func testDownloadChecksSizeAndDisallowsMissingURL() async throws {
+        var p = package(size: 3)
+        let selected = try DDSelection(package: try JSONDecoder().decode(DDScanPackage.self, from: json(p)), flavor: .time)
+        DDStub.handler = { r in
+            XCTAssertEqual(r.url?.host, "uires.w.163.com")
+            XCTAssertNil(r.value(forHTTPHeaderField: "Cookie")); XCTAssertNil(r.value(forHTTPHeaderField: "x-w163-token"))
+            return (200, Data("zip".utf8))
+        }
+        let file = try await client().download(selected); defer { try? FileManager.default.removeItem(at: file) }
+        XCTAssertEqual(try Data(contentsOf: file), Data("zip".utf8))
+        DDStub.handler = { _ in (200, Data("zi".utf8)) }
+        do { _ = try await client().download(selected); XCTFail("Expected truncated download refusal") } catch { }
+        p = package(url: "")
+        let missing = try DDSelection(package: try JSONDecoder().decode(DDScanPackage.self, from: json(p)), flavor: .time)
+        do { _ = try await client().download(missing); XCTFail("Expected missing URL refusal") } catch { }
+    }
+    func testArchiveIdentityMustMatchSelectedReleaseAndFolders() async throws {
+        let root = try target(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let selected = try DDSelection(package: try JSONDecoder().decode(DDScanPackage.self, from: json(package())), flavor: .time)
+        let preview = InstallPreview(staging: root, folders: [root.appendingPathComponent("Example")], replacing: ["Example"])
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(installed: "new")])) }
+        try await client().verify(preview, selection: selected)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.package(installed: "wrong")])) }
+        do { try await client().verify(preview, selection: selected); XCTFail("Expected mismatched release refusal") } catch { }
+    }
+    func testDDReceiptFollowsInstallOverwriteAndBackupRestore() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try "[{\"sn\":\"known\",\"name\":\"Example\",\"folders\":[\"Example\"],\"local_version\":\"1.0\",\"latest_version\":{\"version\":\"1.0\"}}]".write(to: root.appendingPathComponent("addon_strategy.txt"), atomically: true, encoding: .utf8)
-        let addon = Addon(folder: "Example", title: "Example", version: "1.0", author: "", notes: "", interface: "", dependencies: "", tocNames: "")
-        DDStub.handler = { _ in (200, try self.response([self.entry("other"), self.entry("known")])) }
-        let updates = try await client().check(target: root, addons: [addon], flavor: .time)
-        XCTAssertEqual(updates["Example"]?.latest, "2.0")
-        XCTAssertEqual(updates["Example"]?.label, "版本不同 · DD")
-        XCTAssertNil(updates["Example"]?.selection)
-        XCTAssertEqual(URLComponents(url: try XCTUnwrap(updates["Example"]?.externalURL), resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "sn" })?.value, "known")
-        DDStub.handler = { _ in (200, try self.response([self.entry("known", game: 10001)])) }
-        let wrong = try await client().check(target: root, addons: [addon], flavor: .time)
-        XCTAssertNil(wrong["Example"]?.externalURL)
-        try FileManager.default.removeItem(at: root.appendingPathComponent("addon_strategy.txt"))
-        DDStub.handler = { _ in (200, try self.response([self.entry("one"), self.entry("two")])) }
-        let ambiguous = try await client().check(target: root, addons: [addon], flavor: .time)
-        XCTAssertEqual(ambiguous["Example"]?.label, "DD 存在多个匹配")
+        let target = root.appendingPathComponent("Interface/AddOns")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let library = Library(backupRoot: root.appendingPathComponent("Backups"))
+        let archive = try XCTUnwrap(Bundle.module.url(forResource: "Deflate", withExtension: "zip", subdirectory: "Fixtures"))
+        let preview = try library.prepare(archive, target: target, flavor: .time); defer { library.discard(preview) }
+        let selected = try DDSelection(package: try JSONDecoder().decode(DDScanPackage.self, from: json(package())), flavor: .time)
+        try library.install(preview, target: target, dd: selected)
+        XCTAssertEqual(try DDTracking.receipts(in: target).first?.fileID, "new")
+        let snapshot = try library.backup(target, reason: "test")
+        try library.install(preview, target: target)
+        XCTAssertTrue(try DDTracking.receipts(in: target).isEmpty)
+        try library.restore(snapshot, target: target)
+        XCTAssertEqual(try DDTracking.receipts(in: target).count, 1)
+        try library.uninstall(["HelloAzeroth"], target: target)
+        XCTAssertTrue(try DDTracking.receipts(in: target).isEmpty)
     }
-    func testVersionStringsDoNotInventChronology() {
-        XCTAssertEqual(DDClient.status(local: "v2.0", latest: "2.0"), "版本号一致 · DD")
-        XCTAssertEqual(DDClient.status(local: "3.0-local-fix", latest: "2.0"), "版本不同 · DD")
+    func testNewDestinationCreatedAfterPreviewIsNotOverwritten() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("Interface/AddOns")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let library = Library(backupRoot: root.appendingPathComponent("Backups"))
+        let archive = try XCTUnwrap(Bundle.module.url(forResource: "Deflate", withExtension: "zip", subdirectory: "Fixtures"))
+        let preview = try library.prepare(archive, target: target, flavor: .time); defer { library.discard(preview) }
+        let selected = try DDSelection(package: JSONDecoder().decode(DDScanPackage.self, from: json(package())), flavor: .time)
+        let newFolder = target.appendingPathComponent("HelloAzeroth")
+        try FileManager.default.createDirectory(at: newFolder, withIntermediateDirectories: true)
+        try Data("new local data".utf8).write(to: newFolder.appendingPathComponent("keep.txt"))
+        XCTAssertThrowsError(try library.install(preview, target: target, expected: [:], dd: selected))
+        XCTAssertEqual(try Data(contentsOf: newFolder.appendingPathComponent("keep.txt")), Data("new local data".utf8))
+    }
+    func testLiveDDDownloadAndInstallOnTemporaryCopy() async throws {
+        guard ProcessInfo.processInfo.environment["AZEROTH_DD_LIVE_TEST"] == "1" else { throw XCTSkip("Explicit live test only") }
+        let originalRoot = URL(fileURLWithPath: "/Applications/World of Warcraft/_classic_titan_/Interface/AddOns")
+        let titan = try FileManager.default.contentsOfDirectory(atPath: originalRoot.path).filter { $0.hasPrefix("TitanBistooltip") }.sorted()
+        XCTAssertGreaterThan(titan.count, 1)
+        for names in [["!BugGrabber"], titan] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let target = root.appendingPathComponent("Interface/AddOns")
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            for name in names { try FileManager.default.copyItem(at: originalRoot.appendingPathComponent(name), to: target.appendingPathComponent(name)) }
+            let client = DDClient(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
+            let addons = try AddonScanner.scan(target, flavor: .time)
+            let items = try await client.check(target: target, addons: addons, flavor: .time)
+            let update = try XCTUnwrap(items[names[0]]), selection = try XCTUnwrap(update.ddSelection)
+            let refreshed = try await client.refresh(selection, target: target, expected: update.expected)
+            let archive = try await client.download(refreshed); defer { try? FileManager.default.removeItem(at: archive) }
+            let preview = try library.prepare(archive, target: target, flavor: .time); defer { library.discard(preview) }
+            try await client.verify(preview, selection: refreshed)
+            try library.install(preview, target: target, expected: update.expected, dd: refreshed)
+            XCTAssertEqual(try DDTracking.receipts(in: target).first?.fileID, selection.version.sn)
+            XCTAssertEqual(try DDTracking.receipts(in: target).first?.folders.count, names.count)
+            XCTAssertEqual(try library.snapshots(for: target).count, 1)
+            let result = try await client.check(target: target, addons: AddonScanner.scan(target, flavor: .time), flavor: .time)
+            XCTAssertTrue(result.values.allSatisfy { $0.label == "已是最新 · DD（TOC）" && $0.ddSelection == nil })
+            print("LIVE DD: \(selection.package.name) \(selection.package.local_version ?? "unknown") -> \(selection.version.version), \(names.count) folders; download, verify, backup, install, recheck passed")
+        }
     }
 }
