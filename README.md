@@ -1,12 +1,35 @@
-# 艾泽拉斯 · 插件管家 0.1
+# 艾泽拉斯 · 插件管家 0.2
 
-原生 SwiftUI 中文 macOS 应用。优先提供国服时光服的本地管理工作流，同时支持正式服目录。**时光服是用途标记，不是自动识别或兼容性认证。** 没有在线插件目录、下载或自动更新功能。
+原生 SwiftUI 中文 macOS 应用。优先提供国服时光服的本地管理工作流，同时支持正式服目录。**时光服是用途标记，不是自动识别或兼容性认证。** 已支持 GitHub 正式发布 ZIP 的下载与更新检查；CurseForge 及全站插件搜索、无人值守自动安装尚未实现。
 
 ## 已编译应用
 
-交付包同时附带 `AzerothManager-macOS.app.zip`，解压后双击应用即可在本机试用。源码使用 Xcode 26.6 实际编译通过，10 项核心测试全部通过；详情见 `VALIDATION.md`。通用二进制支持 Apple Silicon / Intel，Intel 尚未做硬件运行验证。
+交付包同时附带 `AzerothManager-v0.2.app.zip`，解压后双击应用即可在本机试用。源码使用 Xcode 26.6 实际编译通过，20 项离线核心测试通过，并完成真实 GitHub 下载与临时目录安装测试；详情见 `VALIDATION.md`。通用二进制支持 Apple Silicon / Intel，Intel 尚未做硬件运行验证。
 
 应用为本机临时签名，没有正式发行签名或公证。
+
+## GitHub 下载和更新（v0.2）
+
+1. 在「在线插件」输入作者公开仓库，如 `owner/repo` 或其 HTTPS 仓库首页地址，点击「读取发布」。不是全站插件搜索；必须知道作者仓库地址。
+2. 从最近 30 条发布中的正式版本选择客户端对应的 ZIP 附件。跳过草稿和预发布，不使用自动生成的源码 ZIP。
+3. 点击「下载、检查并预览安装」。下载大小受 256 MiB 限制；服务器提供 SHA-256 时会校验，否则明确标注无远端摘要。ZIP 继续经过原有安全读取器。
+4. 确认来源、文件名、目标目录及覆盖列表后，先备份再安装。来源并不保证客户端兼容；时光服必须由用户按作者说明选择。
+5. 通过 GitHub 安装的插件会记录仓库、发布 ID、附件 ID、版本标签、客户端和文件内容指纹。在「已记录的 GitHub 来源」点击「检查更新」或开启「启动时自动检查」。自动检查默认关闭，不会静默下载或安装。
+6. 发现更新后点击「查看发布 / 更新」，再次选择适用附件并确认。判断使用发布时间和 ID，同一发布下同名附件重新上传也会提示；不会按版本字符串排序猜测更新。
+
+来源记录保存在目标 AddOns 根目录的 `.azeroth-sources.json`，随完整目录备份与恢复。手动 ZIP 覆盖、卸载任一属于同一发布包的文件夹时，会移除该包的整条跟踪记录，避免误认版本。手动导入、原先已有的插件不会自动绑定仓库。来源 JSON 损坏会明确报错并中止修改。
+
+检查更新会计算已跟踪插件的文件指纹；本地修改或文件缺失会提示人工核对。用户显式确认安装仍可覆盖本地修改，覆盖前保留完整备份。同一仓库可提供多个客户端附件，管理器不推断或自动切换附件；改名或拆分的插件文件夹不会自动删除旧目录，需人工核对。
+
+网络请求匿名访问公开 GitHub API，没有内置密钥，不需要提供 GitHub 密码。遵循 HTTPS，仅允许 GitHub 和其文件 CDN 重定向。GitHub 额度限制、仓库不可用、摘要失败和下载不完整会显示错误。下载与读取发布时可取消。当前为加载状态提示，不提供实时百分比。GitHub 访问速度取决于用户网络。
+
+真实联网冒烟测试（只操作临时目录）：
+
+```sh
+AZEROTH_LIVE_GITHUB=1 swift test --filter GitHubSourceTests.testLiveGitHubDownloadAndStagedInstall
+```
+
+接口依据：[GitHub Releases API](https://docs.github.com/en/rest/releases/releases)、[Release Assets API](https://docs.github.com/en/rest/releases/assets)。
 
 ## 环境与编译
 
@@ -95,4 +118,4 @@ Xcode 应用 scheme 没有挂载测试目标；测试位于 Swift Package 中。
 - `Demo`：独立演示目录及真实 Deflate ZIP。
 - `VALIDATION.md`：交付时实际验证情况。
 
-`UpdateProvider` 是在线服务的预留异步接口，默认实现始终明确报「尚未实现」。后续接入需要另行实现来源授权、目录、下载校验和版本策略。
+GitHub 实现位于 `Sources/ManagerCore/GitHubSource.swift`。原 `UpdateProvider` / `UnavailableUpdateProvider` 保留为未接入平台的扩展占位，不用于 GitHub 工作流。CurseForge 仍需获批后另行接入。

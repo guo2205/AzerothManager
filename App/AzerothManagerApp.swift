@@ -43,7 +43,95 @@ struct Prompt: Identifiable {
     @Published var candidates: [URL] = []
     @Published var showCandidates = false
     @Published var prompt: Prompt?
+    @Published var repositoryText = ""
+    @Published var loadedRepository: GitHubRepository?
+    @Published var releases: [GitHubRelease] = []
+    @Published var releaseID: Int?
+    @Published var assetID: Int?
+    @Published var sourceReceipts: [SourceReceipt] = []
+    @Published var updateLabels: [UUID: String] = [:]
+    @Published var networkTask: Task<Void, Never>?
+    @Published var checkOnLaunch = UserDefaults.standard.bool(forKey: "checkGitHubOnLaunch")
+    private var checkedLaunch = false
+    private let github = GitHubClient()
     let library = Library()
+    var chosenRelease: GitHubRelease? { releases.first { $0.id == releaseID } }
+    var chosenAsset: GitHubAsset? { chosenRelease?.zipAssets.first { $0.id == assetID } }
+    func runNetwork<T>(_ message: String, operation: @escaping () async throws -> T, completion: @escaping (T) -> Void) {
+        guard !busy else { return }
+        busy = true; status = message
+        networkTask = Task {
+            do {
+                let value = try await operation()
+                if Task.isCancelled {
+                    if let preview = value as? InstallPreview { library.discard(preview) }
+                    throw CancellationError()
+                }
+                busy = false; networkTask = nil; completion(value)
+            } catch {
+                busy = false; networkTask = nil
+                if error is CancellationError || (error as? URLError)?.code == .cancelled { status = "已取消网络操作" }
+                else { self.error = error.localizedDescription; status = "网络操作未完成" }
+            }
+        }
+    }
+    func loadReleases() {
+        do {
+            let repo = try GitHubRepository(repositoryText), github = github
+            releases = []; releaseID = nil; assetID = nil; loadedRepository = nil
+            runNetwork("正在读取 GitHub 正式发布…", operation: { try await github.releases(in: repo) }) { releases in
+                self.loadedRepository = repo; self.releases = releases
+                self.releaseID = releases.first?.id
+                self.status = releases.isEmpty ? "没有找到正式发布，请确认作者是否上传了 Release" : "已读取发布，请选择对应客户端的 ZIP 附件"
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+    func checkGitHubUpdates() {
+        guard let target, !sourceReceipts.isEmpty else { return }
+        let records = sourceReceipts, github = github, flavor = flavor
+        runNetwork("正在检查已记录的 GitHub 来源…", operation: {
+            var results: [UUID: String] = [:], cache: [GitHubRepository: [GitHubRelease]] = [:]
+            for record in records {
+                try Task.checkCancellation()
+                if record.flavor != flavor { results[record.id] = "客户端标记不同，请确认目录"; continue }
+                do {
+                    let unchanged = try await Task.detached { try SourceTracking.isUnchanged(record, in: target) }.value
+                    if !unchanged { results[record.id] = "本地文件已修改或缺失，更新前请核对"; continue }
+                    if cache[record.repository] == nil { cache[record.repository] = try await github.releases(in: record.repository) }
+                    if let next = record.newerRelease(in: cache[record.repository] ?? []) {
+                        results[record.id] = "检测到发布或附件更新：\(next.tagName)，需确认客户端附件"
+                    } else {
+                        results[record.id] = "最近 30 条发布中未发现较新的正式 ZIP"
+                    }
+                } catch {
+                    if Task.isCancelled { throw CancellationError() }
+                    results[record.id] = error.localizedDescription
+                }
+            }
+            return results
+        }) { values in self.updateLabels = values; self.status = "GitHub 来源检查完成" }
+    }
+    func downloadChosenAsset() {
+        guard let target, let repo = loadedRepository, let release = chosenRelease, let asset = chosenAsset, gameIsClosed() else { return }
+        let source = GitHubSelection(repository: repo, release: release, asset: asset, flavor: flavor)
+        let github = github, library = library, flavor = flavor
+        runNetwork("正在下载并校验 \(asset.name)…", operation: {
+            let archive = try await github.download(source)
+            defer { try? FileManager.default.removeItem(at: archive) }
+            let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
+            if Task.isCancelled { library.discard(preview); throw CancellationError() }
+            return preview
+        }) { preview in
+            self.status = "下载与 ZIP 检查完成，等待安装确认"
+            self.prompt = Prompt(title: "从 GitHub 安装 \(release.tagName)？", message: "来源：\(repo.fullName)\n附件：\(asset.name)\n目标：\(target.path)\n\n安装：\(preview.folders.map(\.lastPathComponent).joined(separator: "、"))\n覆盖：\(preview.replacing.isEmpty ? "无" : preview.replacing.joined(separator: "、"))\n\n请确认附件适用于\(flavor.rawValue)。覆盖会替换整个文件夹，包括本地修改；系统将先备份。", confirm: "备份并安装", destructive: false, action: {
+                guard self.gameIsClosed(), self.target == target, self.flavor == flavor else { library.discard(preview); return }
+                self.run("正在备份并安装 GitHub 插件…", operation: {
+                    defer { library.discard(preview) }
+                    try library.install(preview, target: target, source: source)
+                }) { self.refresh() }
+            }, cancel: { library.discard(preview); self.status = "已取消安装" })
+        }
+    }
     var visible: [Addon] {
         addons.filter { search.isEmpty || [$0.title, $0.folder, $0.author].joined(separator: " ").localizedCaseInsensitiveContains(search) }
     }
@@ -67,11 +155,15 @@ struct Prompt: Identifiable {
     func refresh() {
         guard let target else { return }
         let flavor = flavor, library = library
-        run("正在扫描插件…", operation: { (try AddonScanner.scan(target, flavor: flavor), try library.snapshots(for: target)) }) { value in
+        run("正在扫描插件…", operation: { (try AddonScanner.scan(target, flavor: flavor), try library.snapshots(for: target), try SourceTracking.receipts(in: target)) }) { value in
             guard self.target == target, self.flavor == flavor else { self.refresh(); return }
-            self.addons = value.0; self.snapshots = value.1
+            self.addons = value.0; self.snapshots = value.1; self.sourceReceipts = value.2; self.updateLabels = [:]
             self.selected.formIntersection(Set(value.0.map(\.folder)))
             self.status = "已扫描 \(value.0.count) 个插件 · \(Date().formatted(date: .omitted, time: .shortened))"
+            if !self.checkedLaunch {
+                self.checkedLaunch = true
+                if self.checkOnLaunch { self.checkGitHubUpdates() }
+            }
         }
     }
     func chooseDirectory() {
@@ -87,7 +179,7 @@ struct Prompt: Identifiable {
     }
     func selectTarget(_ url: URL) {
         guard !busy else { return }
-        target = url; selected = []; addons = []; snapshots = []
+        target = url; selected = []; addons = []; snapshots = []; sourceReceipts = []; updateLabels = [:]
         UserDefaults.standard.set(url.path, forKey: "target")
         showCandidates = false; refresh()
     }
@@ -149,9 +241,9 @@ struct ContentView: View {
                     VStack(alignment: .leading) { Text("艾泽拉斯").font(.title3.bold()); Text("插 件 管 家").font(.caption).foregroundStyle(.secondary) }
                 }.padding(.top, 18)
                 Text("工作空间").font(.caption).foregroundStyle(.secondary)
-                ForEach(["插件库", "备份与恢复", "关于与更新"], id: \.self) { item in
+                ForEach(["插件库", "在线插件", "备份与恢复", "关于与更新"], id: \.self) { item in
                     Button { page = item } label: {
-                        Label(item, systemImage: item == "插件库" ? "square.grid.2x2" : item == "备份与恢复" ? "clock.arrow.circlepath" : "info.circle")
+                        Label(item, systemImage: item == "插件库" ? "square.grid.2x2" : item == "在线插件" ? "network" : item == "备份与恢复" ? "clock.arrow.circlepath" : "info.circle")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(11)
                             .background(page == item ? gold.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 8))
                             .foregroundStyle(page == item ? gold : .secondary)
@@ -159,14 +251,15 @@ struct ContentView: View {
                 }
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
-                    Label("本地管理 · 第一版", systemImage: "internaldrive").foregroundStyle(gold)
-                    Text("手动导入，安心整理。\n在线更新尚未接入。").font(.caption).foregroundStyle(.secondary)
+                    Label("本地 + GitHub", systemImage: "internaldrive").foregroundStyle(gold)
+                    Text("GitHub 下载与更新检查。\nCurseForge 尚未接入。").font(.caption).foregroundStyle(.secondary)
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }.padding(22).frame(width: 205).background(Color(red: 0.065, green: 0.075, blue: 0.09))
             Divider()
             VStack(alignment: .leading, spacing: 20) {
                 header
                 if page == "插件库" { libraryView }
+                else if page == "在线插件" { onlineView }
                 else if page == "备份与恢复" { backupView }
                 else { aboutView }
                 Spacer(minLength: 0)
@@ -175,11 +268,16 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.1.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.2.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
         .disabled(model.busy)
+        .overlay(alignment: .bottomTrailing) {
+            if model.networkTask != nil {
+                Button("取消网络操作") { model.networkTask?.cancel() }.padding(.trailing, 110).padding(.bottom, 16)
+            }
+        }
         .alert(item: $model.prompt) { prompt in
             Alert(title: Text(prompt.title), message: Text(prompt.message), primaryButton: prompt.destructive ? .destructive(Text(prompt.confirm), action: prompt.action) : .default(Text(prompt.confirm), action: prompt.action), secondaryButton: .cancel(Text("取消"), action: prompt.cancel))
         }
@@ -286,10 +384,76 @@ struct ContentView: View {
             }.listStyle(.inset)
         }
     }
+    private var onlineView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("GitHub 作者发布").font(.title3.bold())
+                Text("输入作者的公开仓库。只读取最近 30 条发布中的正式版 ZIP 附件；不使用源码压缩包。请选择作者标明适用于当前客户端的文件。").foregroundStyle(.secondary)
+                HStack {
+                    TextField("owner/repo 或 https://github.com/owner/repo", text: $model.repositoryText).textFieldStyle(.roundedBorder)
+                        .onSubmit { model.loadReleases() }
+                    Button("读取发布", action: model.loadReleases).disabled(model.repositoryText.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                if let repository = model.loadedRepository {
+                    Link("查看 \(repository.fullName) 的作者页面", destination: repository.webURL)
+                    if model.releases.isEmpty { Text("未找到正式发布。该仓库可能只提供源码或预发布版本。").foregroundStyle(.secondary) }
+                    else {
+                        Picker("正式版本", selection: $model.releaseID) {
+                            ForEach(model.releases) { release in Text(release.title + " · " + release.tagName).tag(Optional(release.id)) }
+                        }.onChange(of: model.releaseID) { _, _ in model.assetID = nil }
+                        if let release = model.chosenRelease {
+                            Text(release.body ?? "作者未填写更新说明").font(.caption).foregroundStyle(.secondary).lineLimit(8).textSelection(.enabled)
+                            if release.zipAssets.isEmpty { Text("此发布没有可安装的 ZIP 附件。").foregroundStyle(.secondary) }
+                            ForEach(release.zipAssets) { asset in
+                                HStack {
+                                    Button { model.assetID = asset.id } label: {
+                                        HStack {
+                                            Image(systemName: model.assetID == asset.id ? "checkmark.circle.fill" : "circle")
+                                            Text(asset.name).lineLimit(2)
+                                        }
+                                    }.buttonStyle(.plain)
+                                    Spacer()
+                                    Text(ByteCountFormatter.string(fromByteCount: Int64(asset.size), countStyle: .file)).font(.caption).foregroundStyle(.secondary)
+                                    Text(asset.digest == nil ? "无远端摘要" : "提供 SHA-256").font(.caption).foregroundStyle(.secondary)
+                                }.padding(10).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            Button("下载、检查并预览安装", systemImage: "arrow.down.circle", action: model.downloadChosenAsset)
+                                .disabled(model.chosenAsset == nil || model.target == nil)
+                            if model.target == nil { Text("先选择游戏目录才能安装。").font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                }
+                Divider()
+                HStack {
+                    Text("已记录的 GitHub 来源").font(.title3.bold())
+                    Spacer()
+                    Button("检查更新", systemImage: "arrow.clockwise", action: model.checkGitHubUpdates).disabled(model.sourceReceipts.isEmpty)
+                }
+                Toggle("启动时自动检查 GitHub 更新", isOn: $model.checkOnLaunch)
+                    .onChange(of: model.checkOnLaunch) { _, value in UserDefaults.standard.set(value, forKey: "checkGitHubOnLaunch") }
+                Text("自动检查默认关闭；只检查来源记录，不会静默安装。已手动安装的插件不会被猜测绑定到某个仓库。更新时仍需选择客户端附件并确认。").font(.caption).foregroundStyle(.secondary)
+                if model.sourceReceipts.isEmpty { Text("通过上方下载并安装后，将在此记录来源。手动 ZIP 导入暂不跟踪在线版本。").foregroundStyle(.secondary) }
+                ForEach(model.sourceReceipts) { record in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(record.repository.fullName).fontWeight(.medium)
+                            Spacer()
+                            Button("查看发布 / 更新") {
+                                model.repositoryText = record.repository.fullName; model.loadReleases()
+                            }
+                        }
+                        Text("已安装：\(record.tagName) · \(record.flavor.rawValue)\n附件：\(record.assetName)\n插件：\(record.folders.joined(separator: "、"))").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        if let label = model.updateLabels[record.id] { Text(label).font(.callout).foregroundStyle(gold) }
+                    }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+                }
+                Text("CurseForge 搜索与自动更新尚未接入。GitHub 匿名请求有频率限制，网络失败会明确报错。").font(.caption).foregroundStyle(.secondary)
+            }.padding(.bottom, 10)
+        }
+    }
     private var aboutView: some View {
         VStack(alignment: .leading, spacing: 22) {
-            Label("在线自动更新 · 尚未实现", systemImage: "network.slash").font(.title3.bold()).foregroundStyle(gold)
-            Text("第一版专注本地插件管理。没有接入插件目录、下载源、版本比对或自动更新服务；界面不会显示虚构的更新结果。工程已预留 UpdateProvider 接口。")
+            Label("GitHub 下载与更新检查 · v0.2", systemImage: "network").font(.title3.bold()).foregroundStyle(gold)
+            Text("已接入公开 GitHub 仓库的正式发布 ZIP：读取版本、下载、安全安装、来源记录和新版本检查。可选择启动时自动检查，更新安装仍需确认。CurseForge 搜索、下载及无人值守自动安装尚未实现。")
             Divider()
             Text("使用前请退出游戏").font(.headline)
             Text("先确认实际客户端的 AddOns 路径，再导入 ZIP。时光服用途标记不代表自动适配；TOC 优先读取通用文件，正式服优先读取 Mainline 文件。请在游戏内验证兼容性。")

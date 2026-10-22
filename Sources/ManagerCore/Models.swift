@@ -5,7 +5,7 @@ public struct ManagerError: LocalizedError {
     public init(_ message: String) { self.message = message }
     public var errorDescription: String? { message }
 }
-public enum Flavor: String, CaseIterable, Identifiable, Codable {
+public enum Flavor: String, CaseIterable, Identifiable, Codable, Sendable {
     case time = "国服时光服", retail = "正式服"
     public var id: String { rawValue }
 }

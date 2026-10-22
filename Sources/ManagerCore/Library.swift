@@ -67,20 +67,25 @@ public final class Library {
         } catch { try? fm.removeItem(at: staging); throw error }
     }
     public func discard(_ preview: InstallPreview) { try? fm.removeItem(at: preview.staging) }
-    public func install(_ preview: InstallPreview, target: URL) throws {
+    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil) throws {
         try FileSafety.checkTree(preview.staging)
+        let receipt = try source.map { try SourceReceipt(selection: $0, folders: preview.folders) }
         try mutate(target, reason: "安装 ZIP 前") { next in
             for folder in preview.folders {
                 let key = folder.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased()
                 for existing in try self.fm.contentsOfDirectory(at: next, includingPropertiesForKeys: nil) where existing.lastPathComponent.precomposedStringWithCanonicalMapping.lowercased() == key { try self.fm.removeItem(at: existing) }
                 try self.fm.copyItem(at: folder, to: next.appendingPathComponent(folder.lastPathComponent))
             }
+            var records = SourceTracking.removing(preview.folders.map(\.lastPathComponent), from: try SourceTracking.receipts(in: next))
+            if let receipt { records.append(receipt) }
+            try SourceTracking.write(records, to: next)
         }
     }
     public func uninstall(_ folders: [String], target: URL) throws {
         guard !folders.isEmpty, folders.allSatisfy({ !$0.isEmpty && !$0.contains("/") && !$0.contains("\\") && $0 != "." && $0 != ".." }) else { throw ManagerError("插件名称无效") }
         try mutate(target, reason: "卸载前：" + folders.joined(separator: "、")) { next in
             for folder in folders { try self.fm.removeItem(at: next.appendingPathComponent(folder)) }
+            try SourceTracking.write(SourceTracking.removing(folders, from: SourceTracking.receipts(in: next)), to: next)
         }
     }
     public func restore(_ snapshot: Snapshot, target: URL) throws {
