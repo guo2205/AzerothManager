@@ -1,12 +1,24 @@
-# 艾泽拉斯 · 插件管家 0.2
+# 艾泽拉斯 · 插件管家 0.3
 
-原生 SwiftUI 中文 macOS 应用。优先提供国服时光服的本地管理工作流，同时支持正式服目录。**时光服是用途标记，不是自动识别或兼容性认证。** 已支持 GitHub 正式发布 ZIP 的下载与更新检查；CurseForge 及全站插件搜索、无人值守自动安装尚未实现。
+原生 SwiftUI 中文 macOS 应用。优先提供国服时光服的本地管理工作流，同时支持正式服目录。**时光服是用途标记，不是自动识别或兼容性认证。** 已支持 CurseForge 插件搜索、客户端分支筛选、下载校验和更新检查，也支持 GitHub 作者发布。无人值守自动安装尚未实现。
 
 ## 已编译应用
 
-交付包同时附带 `AzerothManager-v0.2.app.zip`，解压后双击应用即可在本机试用。源码使用 Xcode 26.6 实际编译通过，20 项离线核心测试通过，并完成真实 GitHub 下载与临时目录安装测试；详情见 `VALIDATION.md`。通用二进制支持 Apple Silicon / Intel，Intel 尚未做硬件运行验证。
+交付包同时附带 `AzerothManager-v0.3.app.zip`，解压后双击应用即可在本机试用。源码使用 Xcode 26.6 实际编译通过，27 项离线核心测试通过，并完成真实 GitHub 下载与临时目录安装测试；详情见 `VALIDATION.md`。通用二进制支持 Apple Silicon / Intel，Intel 尚未做硬件运行验证。
 
 应用为本机临时签名，没有正式发行签名或公证。
+
+## CurseForge 搜索、下载与更新（v0.3）
+
+1. 在「在线插件 → CurseForge」输入自己的 API Key，点击「保存并验证」。密钥只保存在本机登录钥匙串；清空输入框，不写入偏好设置、来源记录、日志或源码。可验证已保存密钥或移除它。交付应用不内置共享密钥。
+2. 读取官方客户端分支，按作者说明选择。例如 API 实测返回 `WoW Wrath Titan Reforged` 和 `WoW Retail`。本地「国服时光服」标签不会自动替你决定分支。可选填写精确游戏版本；留空列出所选分支的版本。
+3. 搜索关键词（留空浏览热门），每页 20 项，支持翻页。查看插件版本后列出 API 返回的最近 50 个文件中匹配的正式 ZIP，显示作者标记的游戏版本与必需依赖 ID。依赖当前需单独搜索、安装。
+4. 下载前重新检查作者分发许可，只使用 API 提供的下载地址；无链接或作者禁止第三方分发时提示到作者页面。认证请求不跟随重定向，API Key 不发送给下载 CDN。ZIP 大小上限 256 MiB，检查声明长度和 API 提供的 SHA-1 / MD5 摘要，再执行本地 ZIP 安全检查。
+5. 下载完成后预览实际文件夹与覆盖列表，确认才会先备份再安装。通过 CurseForge 安装的记录可手动检查更新，或选择启动自动检查（默认关闭）。检查使用安装时的分支、可选精确版本、发布时间及文件 ID；本地修改会提示人工核对。更新仍需用户预览确认，不静默安装。
+
+来源记录位于 AddOns 下的 `.azeroth-curseforge.json`，只保存来源 ID、版本筛选条件、客户端标记、文件夹和指纹，随备份恢复。手动 ZIP、GitHub 或 CurseForge 覆盖同一包的任意文件夹，或卸载时，会清除冲突的旧记录。已有手动安装的插件暂不自动绑定 CurseForge ID；未实现全库指纹匹配、一键批量更新、自动安装依赖或后台定时更新。
+
+请求使用临时 URLSession，不持久缓存 API 数据；密钥失效、权限拒绝、限流、格式错误、摘要不符与下载不完整均明确报错。遵循作者分发设置，不推导下载链接绕过限制。接口依据：[CurseForge 官方 REST API](https://docs.curseforge.com/rest-api/)。实际联网验证和限制见 `VALIDATION.md`。
 
 ## GitHub 下载和更新（v0.2）
 
@@ -118,4 +130,4 @@ Xcode 应用 scheme 没有挂载测试目标；测试位于 Swift Package 中。
 - `Demo`：独立演示目录及真实 Deflate ZIP。
 - `VALIDATION.md`：交付时实际验证情况。
 
-GitHub 实现位于 `Sources/ManagerCore/GitHubSource.swift`。原 `UpdateProvider` / `UnavailableUpdateProvider` 保留为未接入平台的扩展占位，不用于 GitHub 工作流。CurseForge 仍需获批后另行接入。
+GitHub 实现位于 `Sources/ManagerCore/GitHubSource.swift`。原 `UpdateProvider` / `UnavailableUpdateProvider` 保留为未接入平台的扩展占位，不用于 GitHub 工作流。CurseForge 实现位于 `Sources/ManagerCore/CurseForgeSource.swift`，包含钥匙串、API、下载校验与独立来源记录。

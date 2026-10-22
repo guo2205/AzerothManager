@@ -67,8 +67,10 @@ public final class Library {
         } catch { try? fm.removeItem(at: staging); throw error }
     }
     public func discard(_ preview: InstallPreview) { try? fm.removeItem(at: preview.staging) }
-    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil) throws {
+    public func install(_ preview: InstallPreview, target: URL, source: GitHubSelection? = nil, curseForge: CFSelection? = nil) throws {
+        guard source == nil || curseForge == nil else { throw ManagerError("只能记录一个安装来源") }
         try FileSafety.checkTree(preview.staging)
+        let cfReceipt = try curseForge.map { try CFReceipt(selection: $0, folders: preview.folders) }
         let receipt = try source.map { try SourceReceipt(selection: $0, folders: preview.folders) }
         try mutate(target, reason: "安装 ZIP 前") { next in
             for folder in preview.folders {
@@ -79,6 +81,9 @@ public final class Library {
             var records = SourceTracking.removing(preview.folders.map(\.lastPathComponent), from: try SourceTracking.receipts(in: next))
             if let receipt { records.append(receipt) }
             try SourceTracking.write(records, to: next)
+            var cfRecords = CFTracking.removing(preview.folders.map(\.lastPathComponent), from: try CFTracking.receipts(in: next))
+            if let cfReceipt { cfRecords.append(cfReceipt) }
+            try CFTracking.write(cfRecords, to: next)
         }
     }
     public func uninstall(_ folders: [String], target: URL) throws {
@@ -86,6 +91,7 @@ public final class Library {
         try mutate(target, reason: "卸载前：" + folders.joined(separator: "、")) { next in
             for folder in folders { try self.fm.removeItem(at: next.appendingPathComponent(folder)) }
             try SourceTracking.write(SourceTracking.removing(folders, from: SourceTracking.receipts(in: next)), to: next)
+            try CFTracking.write(CFTracking.removing(folders, from: CFTracking.receipts(in: next)), to: next)
         }
     }
     public func restore(_ snapshot: Snapshot, target: URL) throws {
