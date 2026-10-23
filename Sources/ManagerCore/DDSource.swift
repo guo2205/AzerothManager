@@ -142,6 +142,7 @@ public struct DDClient: Sendable {
             guard matches.count == 1, let package = matches.first, let latest = package.latest_version else {
                 result[addon.folder] = InstalledUpdate(label: matches.count > 1 ? "DD 匹配冲突" : "DD 未精确匹配"); continue
             }
+            let packageInfo = DDPackageInfo(package: package, latest: latest)
             let valid = !package.folders.isEmpty && package.folders.allSatisfy(Self.validFolder)
             let complete = package.match_degree == "all" && package.local_status == 0 && valid
             let receipt = local.2.first { $0.projectID == package.sn && $0.flavor == flavor && $0.folders.contains(addon.folder) }
@@ -149,10 +150,10 @@ public struct DDClient: Sendable {
             let label: String
             if !complete { label = "DD 部分匹配或冲突" }
             else if !unchanged { label = "本地有修改 · DD" }
-            else if package.detail_sn == latest.sn { label = "已是最新 · DD（TOC）" }
-            else { label = "DD 版本可更新" }
+            else if package.detail_sn == latest.sn { label = packageInfo.containsMultipleFolders ? "所属包已是最新（TOC）" : "已是最新 · DD（TOC）" }
+            else { label = packageInfo.containsMultipleFolders ? "所属包可更新" : "DD 版本可更新" }
             let downloadable = complete && latest.release_type == 1 && latest.size.map { $0 > 0 && $0 <= Self.maxArchiveBytes } == true && latest.file_path.flatMap(URL.init(string:)).map(DDRedirectPolicy.allowsCDN) == true && package.need_buy != true && package.need_anchor_vip != true
-            result[addon.folder] = InstalledUpdate(label: label, latest: latest.version, expected: local.1, externalURL: Self.website(sn: package.sn, gameType: Self.gameType(flavor)), ddSelection: downloadable && (package.detail_sn != latest.sn || !unchanged) ? try DDSelection(package: package, flavor: flavor) : nil, isCurrent: complete && unchanged && package.detail_sn == latest.sn)
+            result[addon.folder] = InstalledUpdate(label: label, packageInfo: packageInfo, expected: local.1, externalURL: Self.website(sn: package.sn, gameType: Self.gameType(flavor)), ddSelection: downloadable && (package.detail_sn != latest.sn || !unchanged) ? try DDSelection(package: package, flavor: flavor) : nil, isCurrent: complete && unchanged && package.detail_sn == latest.sn)
         }
         return result
     }

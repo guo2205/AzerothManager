@@ -261,7 +261,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.7.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.8.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -350,21 +350,28 @@ struct ContentView: View {
                     TableColumn("插件") { addon in
                         VStack(alignment: .leading, spacing: 4) { Text(addon.title).fontWeight(.medium); Text(addon.folder).font(.caption).foregroundStyle(.secondary) }.padding(.vertical, 5)
                     }.width(min: 180, ideal: 260)
-                    TableColumn("版本", value: \.version).width(min: 80, ideal: 110)
+                    TableColumn("本地 TOC 版本", value: \.version).width(min: 95, ideal: 115)
                     TableColumn("作者", value: \.author).width(min: 90, ideal: 130)
-                    TableColumn("最新版本") { addon in
-                        Text(model.installedUpdates[addon.folder]?.latest ?? "—").font(.caption).lineLimit(2)
-                    }.width(min: 90, ideal: 120)
+                    TableColumn("DD 整包版本") { addon in
+                        if let package = model.installedUpdates[addon.folder]?.packageInfo {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("已装包：\(package.installedVersionText)").foregroundStyle(.secondary)
+                                Text("最新包：\(package.latestVersion)").foregroundStyle(gold)
+                                Text(package.name).foregroundStyle(.secondary).lineLimit(1)
+                            }.font(.caption).padding(.vertical, 4)
+                                .help("所属 DD 包：\(package.name)\n已装整包：\(package.installedVersionText)\n最新整包：\(package.latestVersion)\n此处是发布包版本，各子目录的 TOC 版本独立显示。")
+                        } else { Text("—").foregroundStyle(.secondary) }
+                    }.width(min: 190, ideal: 230)
                     TableColumn("状态 / 操作") { addon in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.installedUpdates[addon.folder]?.label ?? "等待检查").font(.caption).lineLimit(2)
                             if model.installedUpdates[addon.folder]?.ddSelection != nil {
                                 Button { model.updateInstalled(addon) } label: {
-                                    Label("更新", systemImage: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
+                                    Label(model.installedUpdates[addon.folder]?.packageInfo?.containsMultipleFolders == true ? "更新整包" : "更新", systemImage: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
                                         .padding(.horizontal, 12).padding(.vertical, 5).foregroundStyle(.black)
                                         .background(gold.gradient, in: Capsule())
                                 }.buttonStyle(.plain)
-                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.label != "已是最新 · DD（TOC）" {
+                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.isCurrent != true {
                                 Link(destination: url) {
                                     Label("前往 DD", systemImage: "arrow.up.right").font(.system(size: 11, weight: .semibold))
                                         .padding(.horizontal, 11).padding(.vertical, 5).foregroundStyle(gold)
@@ -378,10 +385,17 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(addon.notes.isEmpty ? "此插件没有中文说明。" : addon.notes).lineLimit(3)
                         Text("依赖：\(addon.dependencies)\nTOC：\(addon.tocNames)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        if let package = model.installedUpdates[addon.folder]?.packageInfo {
+                            Text("所属 DD 包：\(package.name) · 已装整包 \(package.installedVersionText) · 最新整包 \(package.latestVersion)").font(.caption).foregroundStyle(gold).textSelection(.enabled)
+                            if package.containsMultipleFolders {
+                                Text("更新整包会一起处理这 \(package.folders.count) 个目录：\(package.folders.joined(separator: "、"))").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                    .help(package.folders.joined(separator: "、"))
+                            }
+                        }
                     }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
                 }
             }
-            Label("通过网易 DD 官方扫描获取新版并直接更新，安装前自动备份。TOC 匹配不代表所有代码完全一致。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            Label("本地 TOC 与 DD 整包版本分别显示；子模块随所属包一起更新，安装前自动备份。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
         }
     }
     private var backupView: some View {
@@ -438,7 +452,7 @@ struct ContentView: View {
                                     Text(item.name).font(.headline)
                                     Text(item.description ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                     HStack(spacing: 14) {
-                                        Text("DD 版本：" + (item.latest_version?.version ?? "未知"))
+                                        Text("DD 整包版本：" + (item.latest_version?.version ?? "未知"))
                                         if let downloads = item.downloads(for: model.ddLoadedSort) { Text("\(model.ddLoadedSort.downloadTitle) \(downloads.formatted())") }
                                     }.font(.caption).foregroundStyle(gold)
                                 }
@@ -459,11 +473,11 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.7", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Label("艾泽拉斯插件管家 · v0.8", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
                 Text("仅通过网易 DD 官方扫描查询并直接下载更新，无需密钥。插件库将可更新置顶、已是最新置底；在线页默认展示周热门，也可查看月热门与总下载排行。")
                 Divider()
                 Text("自动检查与一键更新").font(.headline)
-                Text("每次启动、扫描或安装完成后自动检查。DD 使用 TOC 文件名和 MD5 扫描识别插件，并比较包版本 ID；不需要本地 DD 清单。点击更新会复查版本、下载网易 CDN ZIP、检查大小与 ZIP 完整性，再向 DD 核对解压后的 TOC 版本和目录，最后备份整个 AddOns 并安装。DD 未提供整个 ZIP 的密码学摘要，TOC 匹配也不等于所有代码完全一致。")
+                Text("每次启动、扫描或安装完成后自动检查。DD 使用 TOC 文件名和 MD5 扫描识别插件，并比较包版本 ID；不需要本地 DD 清单。本地 TOC 版本由各子目录声明，DD 版本属于整个发布包；二者分开显示，不用依赖插件或整包版本代替子模块版本。点击更新会复查版本、下载网易 CDN ZIP、检查大小与 ZIP 完整性，再向 DD 核对解压后的 TOC 版本和目录，最后备份整个 AddOns 并安装。DD 未提供整个 ZIP 的密码学摘要，TOC 匹配也不等于所有代码完全一致。")
                 Text("请退出游戏后更新。一次更新可能替换同一插件包的多个文件夹，本地修改也会被替换；WTF 设置不会更改。检查后发生本地变更会中止安装，需重新检查。依赖暂不自动安装，未提供无人值守定时更新。")
                 Text("网易 DD 国服时光服使用泰坦重铸分支，正式服使用正式服分支。作者标记仍不能保证游戏内兼容。应用仅本机临时签名，尚无发行签名或公证。").font(.caption).foregroundStyle(.secondary)
             }.padding(.bottom, 12)

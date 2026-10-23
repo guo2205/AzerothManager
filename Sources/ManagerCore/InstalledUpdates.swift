@@ -1,16 +1,34 @@
 import Foundation
 
+/// DD 发布版本属于插件包，不代表其中任一子目录的 TOC 版本。
+public struct DDPackageInfo: Sendable {
+    public let projectID: String
+    public let name: String
+    public let installedVersion: String?
+    public let latestVersion: String
+    public let folders: [String]
+    public var containsMultipleFolders: Bool { folders.count > 1 }
+    public var installedVersionText: String {
+        let value = installedVersion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? "未识别" : value
+    }
+    init(package: DDScanPackage, latest: DDAddon.Version) {
+        projectID = package.sn; name = package.name; installedVersion = package.local_version
+        latestVersion = latest.version; folders = package.folders
+    }
+}
+
 public struct InstalledUpdate: Sendable {
     public let label: String
-    public let latest: String?
+    public let packageInfo: DDPackageInfo?
     public let externalURL: URL?
     public let ddSelection: DDSelection?
     /// 检查时的本地内容指纹，安装前再次核对。
     public let expected: [String: String]
     public let isCurrent: Bool
     public var sortPriority: Int { ddSelection != nil ? 0 : isCurrent ? 2 : 1 }
-    public init(label: String, latest: String? = nil, expected: [String: String] = [:], externalURL: URL? = nil, ddSelection: DDSelection? = nil, isCurrent: Bool = false) {
-        self.label = label; self.latest = latest; self.expected = expected
+    public init(label: String, packageInfo: DDPackageInfo? = nil, expected: [String: String] = [:], externalURL: URL? = nil, ddSelection: DDSelection? = nil, isCurrent: Bool = false) {
+        self.label = label; self.packageInfo = packageInfo; self.expected = expected
         self.externalURL = externalURL; self.ddSelection = ddSelection; self.isCurrent = isCurrent
     }
 }

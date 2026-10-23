@@ -93,9 +93,48 @@ final class DDSourceTests: XCTestCase {
         }
         let result = try await client().check(target: root, addons: AddonScanner.scan(root, flavor: .time), flavor: .time)
         let item = try XCTUnwrap(result["Example"])
-        XCTAssertEqual(item.label, "DD 版本可更新"); XCTAssertEqual(item.latest, "2.0"); XCTAssertNotNil(item.ddSelection)
+        XCTAssertEqual(item.label, "DD 版本可更新"); XCTAssertEqual(item.packageInfo?.latestVersion, "2.0"); XCTAssertNotNil(item.ddSelection)
         try Data("local changed=2".utf8).write(to: root.appendingPathComponent("Example/Code.lua"))
         do { _ = try await client().refresh(try XCTUnwrap(item.ddSelection), target: root, expected: item.expected); XCTFail("Expected changed-file refusal") } catch { XCTAssertTrue(error.localizedDescription.contains("变化")) }
+    }
+    private func targetWithModule() throws -> URL {
+        let root = try target(), helper = root.appendingPathComponent("Example_Helper")
+        try FileManager.default.createDirectory(at: helper, withIntermediateDirectories: true)
+        try Data("## Title: Helper\n## Version: 1.6\n## Dependencies: Example".utf8).write(to: helper.appendingPathComponent("Example_Helper.toc"))
+        return root
+    }
+    private func modulePackage(installed: String, latest: String, currentFile: String, latestFile: String) -> [String: Any] {
+        var p = package(file: latestFile, installed: currentFile)
+        p["name"] = "Example 整合包"; p["folders"] = ["Example", "Example_Helper"]; p["local_version"] = installed
+        var version = p["latest_version"] as! [String: Any]; version["version"] = latest; p["latest_version"] = version
+        return p
+    }
+    func testModuleVersionDoesNotBecomePackageOrDependencyVersion() async throws {
+        let root = try targetWithModule(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let addons = try AddonScanner.scan(root, flavor: .time)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.modulePackage(installed: "3.93", latest: "3.93", currentFile: "same", latestFile: "same")])) }
+        let result = try await client().check(target: root, addons: addons, flavor: .time)
+        let module = try XCTUnwrap(result["Example_Helper"]), info = try XCTUnwrap(module.packageInfo)
+        XCTAssertEqual(addons.first(where: { $0.folder == "Example_Helper" })?.version, "1.6")
+        XCTAssertEqual(addons.first(where: { $0.folder == "Example_Helper" })?.dependencies, "Example")
+        XCTAssertEqual(info.installedVersion, "3.93"); XCTAssertEqual(info.latestVersion, "3.93")
+        XCTAssertEqual(info.name, "Example 整合包"); XCTAssertTrue(info.containsMultipleFolders)
+        XCTAssertTrue(module.isCurrent); XCTAssertNil(module.ddSelection)
+        XCTAssertEqual(module.label, "所属包已是最新（TOC）")
+    }
+    func testModuleUpdateUsesPackageFileIdentityAndRetainsBothPackageVersions() async throws {
+        let root = try targetWithModule(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
+        let addons = try AddonScanner.scan(root, flavor: .time)
+        DDStub.handler = { _ in (200, try self.scanResponse([self.modulePackage(installed: "3.93", latest: "3.94", currentFile: "old", latestFile: "new")])) }
+        let result = try await client().check(target: root, addons: addons, flavor: .time)
+        let parent = try XCTUnwrap(result["Example"]), module = try XCTUnwrap(result["Example_Helper"])
+        XCTAssertEqual(module.packageInfo?.installedVersion, "3.93")
+        XCTAssertEqual(module.packageInfo?.latestVersion, "3.94")
+        XCTAssertEqual(module.packageInfo?.projectID, parent.packageInfo?.projectID)
+        XCTAssertEqual(module.ddSelection?.version.sn, "new")
+        XCTAssertEqual(module.ddSelection?.package.folders, ["Example", "Example_Helper"])
+        XCTAssertEqual(module.label, "所属包可更新"); XCTAssertFalse(module.isCurrent)
+        XCTAssertEqual(addons.first(where: { $0.folder == "Example_Helper" })?.version, "1.6")
     }
     func testPartialOrAmbiguousMatchCannotUpdate() async throws {
         let root = try target(); defer { try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent()) }
@@ -216,7 +255,7 @@ final class DDSourceTests: XCTestCase {
             XCTAssertEqual(try DDTracking.receipts(in: target).first?.folders.count, names.count)
             XCTAssertEqual(try library.snapshots(for: target).count, 1)
             let result = try await client.check(target: target, addons: AddonScanner.scan(target, flavor: .time), flavor: .time)
-            XCTAssertTrue(result.values.allSatisfy { $0.label == "已是最新 · DD（TOC）" && $0.ddSelection == nil })
+            XCTAssertTrue(result.values.allSatisfy { $0.isCurrent && $0.ddSelection == nil })
             print("LIVE DD: \(selection.package.name) \(selection.package.local_version ?? "unknown") -> \(selection.version.version), \(names.count) folders; download, verify, backup, install, recheck passed")
         }
     }
