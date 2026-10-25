@@ -2,9 +2,10 @@
 set -euo pipefail
 cd "${0:A:h:h}"
 xcodebuild -project AzerothManager.xcodeproj -scheme AzerothManager -configuration Release \
-  -derivedDataPath DerivedData CODE_SIGN_IDENTITY=- build > /tmp/azeroth-latest-build.log 2>&1
+  -destination 'generic/platform=macOS' -derivedDataPath DerivedData 'ARCHS=arm64 x86_64' ONLY_ACTIVE_ARCH=NO CODE_SIGN_IDENTITY=- build > /tmp/azeroth-latest-build.log 2>&1
 built="$PWD/DerivedData/Build/Products/Release/AzerothManager.app"
 [[ -x "$built/Contents/MacOS/AzerothManager" ]]
+codesign --verify --deep --strict "$built"
 # Stop only this app's executable before replacing its project-owned distribution.
 pkill -x AzerothManager || true
 mkdir -p outputs
@@ -15,5 +16,5 @@ for archive in outputs/AzerothManager-v*.app.zip(N); do rm -- "$archive"; done
 if [[ -f ../AzerothManager-macOS.app.zip ]]; then rm -- ../AzerothManager-macOS.app.zip; fi
 # Preserve one canonical distribution bundle; Xcode can rebuild its product next run.
 rm -rf -- "$built"
-/usr/bin/ditto -c -k --sequesterRsrc --keepParent outputs/AzerothManager.app outputs/AzerothManager-v0.8.app.zip
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent outputs/AzerothManager.app outputs/AzerothManager-v0.9.app.zip
 open "$PWD/outputs/AzerothManager.app"

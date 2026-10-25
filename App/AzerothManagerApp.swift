@@ -100,34 +100,51 @@ struct Prompt: Identifiable {
             guard self.target == target, self.flavor == flavor else { return }
             self.installedUpdates = result
             let matched = result.values.filter { $0.externalURL != nil }.count
-            let updates = result.values.filter { $0.ddSelection != nil }.count
-            self.status = "DD 检查完成 · 匹配 \(matched) 个文件夹 · \(updates) 个文件夹可更新 · 更新前自动备份"
+            let updates = self.updateablePackages.count
+            self.status = "DD 检查完成 · 匹配 \(matched) 个文件夹 · \(updates) 个插件包可更新 · 更新前自动备份"
         }
     }
-    func updateInstalled(_ addon: Addon) {
-        guard let item = installedUpdates[addon.folder], let selection = item.ddSelection else { return }
-        updateDD(addon, selection: selection, expected: item.expected)
+    @Published var batchResult: PackageBatchResult?
+    var packages: [AddonPackageRow] { InstalledUpdates.packages(addons, updates: installedUpdates) }
+    var visiblePackages: [AddonPackageRow] { InstalledUpdates.packages(addons, updates: installedUpdates, search: search) }
+    var updateablePackages: [AddonPackageRow] { packages.filter(\.canUpdate) }
+    func updatePackage(_ row: AddonPackageRow) {
+        guard let update = row.update, let selection = update.ddSelection else { return }
+        startPackageUpdates([PackageUpdateJob(selection: selection, expected: update.expected)])
     }
-    func updateDD(_ addon: Addon, selection: DDSelection, expected: [String: String]) {
-        guard let target, selection.flavor == flavor, !busy, gameIsClosed() else { return }
-        let client = DDClient(), library = library, flavor = flavor
-        runNetwork("正在从 DD 下载并校验 \(selection.package.name)…", operation: {
-            let refreshed = try await client.refresh(selection, target: target, expected: expected)
-            let archive = try await client.download(refreshed)
-            defer { try? FileManager.default.removeItem(at: archive) }
-            let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
-            do {
-                try Task.checkCancellation()
-                guard preview.folders.contains(where: { $0.lastPathComponent == addon.folder }) else { throw ManagerError("DD 新版缺少所选插件目录，已停止安装") }
-                try await client.verify(preview, selection: refreshed)
-                return preview
-            } catch { library.discard(preview); throw error }
-        }) { preview in
-            guard self.target == target, self.flavor == flavor, self.gameIsClosed() else { library.discard(preview); return }
-            self.run("正在自动备份并安装 DD 插件…", operation: {
+    func updateAllPackages() {
+        let jobs = updateablePackages.compactMap { row -> PackageUpdateJob? in
+            guard let update = row.update, let selection = update.ddSelection else { return nil }
+            return PackageUpdateJob(selection: selection, expected: update.expected)
+        }
+        startPackageUpdates(jobs)
+    }
+    func startPackageUpdates(_ jobs: [PackageUpdateJob]) {
+        guard !busy, !jobs.isEmpty, let target, gameIsClosed(), jobs.allSatisfy({ $0.selection.flavor == flavor }) else { return }
+        let flavor = flavor, library = library, client = DDClient()
+        batchResult = nil; busy = true; status = "正在准备更新 \(jobs.count) 个插件包…"
+        networkTask = Task {
+            let result = await PackageBatch.run(jobs, progress: { index, total, name in
+                self.status = "更新 \(index)/\(total)：\(name) · 下载、校验、备份并安装"
+            }, operation: { job in
+                guard self.target == target, self.flavor == flavor else { throw CancellationError() }
+                guard self.gameIsClosed() else { throw CancellationError() }
+                let refreshed = try await client.refresh(job.selection, target: target, expected: job.expected)
+                let archive = try await client.download(refreshed)
+                defer { try? FileManager.default.removeItem(at: archive) }
+                let preview = try await Task.detached { try library.prepare(archive, target: target, flavor: flavor) }.value
                 defer { library.discard(preview) }
-                try library.install(preview, target: target, expected: expected, dd: selection)
-            }) { self.refresh() }
+                try Task.checkCancellation()
+                try await client.verify(preview, selection: refreshed)
+                try Task.checkCancellation()
+                guard self.target == target, self.flavor == flavor, self.gameIsClosed() else { throw CancellationError() }
+                // 文件事务开始后不再取消，确保本包完成或回滚；取消会在下一包生效。
+                try await Task.detached { try library.install(preview, target: target, expected: job.expected, dd: refreshed) }.value
+            })
+            self.batchResult = result
+            self.busy = false; self.networkTask = nil
+            self.status = "更新结束 · 成功 \(result.succeeded) 包 · 失败 \(result.failed) 包" + (result.cancelled ? " · 剩余 \(result.remaining) 包未执行" : "")
+            self.refresh()
         }
     }
     var visible: [Addon] { InstalledUpdates.ordered(addons, updates: installedUpdates, search: search) }
@@ -172,7 +189,7 @@ struct Prompt: Identifiable {
     }
     func selectTarget(_ url: URL) {
         guard !busy else { return }
-        target = url; selected = []; addons = []; snapshots = []; installedUpdates = [:]
+        target = url; selected = []; addons = []; snapshots = []; installedUpdates = [:]; batchResult = nil
         UserDefaults.standard.set(url.path, forKey: "target")
         showCandidates = false; refresh()
     }
@@ -225,6 +242,7 @@ struct Prompt: Identifiable {
 struct ContentView: View {
     @ObservedObject var model: ManagerModel
     @State private var page = "插件库"
+    @State private var expandedPackages: Set<String> = []
     private let gold = Color(red: 0.89, green: 0.70, blue: 0.39)
     var body: some View {
         HStack(spacing: 0) {
@@ -261,7 +279,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.8.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.9.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -315,9 +333,11 @@ struct ContentView: View {
     private var libraryView: some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack {
-                Text("\(model.addons.count)").font(.title.bold()).foregroundStyle(gold)
-                Text("个本地插件").foregroundStyle(.secondary)
+                Text("\(model.packages.count)").font(.title.bold()).foregroundStyle(gold)
+                Text("个插件包 · \(model.addons.count) 个目录").foregroundStyle(.secondary)
                 Spacer()
+                Button("更新全部（\(model.updateablePackages.count) 包）", systemImage: "arrow.down.to.line") { model.updateAllPackages() }
+                    .disabled(model.updateablePackages.isEmpty)
                 Button(action: model.checkInstalledUpdates) {
                     Label("检查更新", systemImage: "arrow.triangle.2.circlepath").font(.system(size: 12, weight: .semibold))
                         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -330,7 +350,27 @@ struct ContentView: View {
                         .background(gold, in: RoundedRectangle(cornerRadius: 6))
                 }.buttonStyle(.plain)
             }.disabled(model.target == nil)
-            Label("网易 DD · 可更新置顶，已是最新置底", systemImage: "arrow.up.arrow.down").font(.caption).foregroundStyle(.secondary)
+            if let result = model.batchResult {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("\(result.cancelled ? "已停止后续任务" : "更新完成") · 成功 \(result.succeeded) 包 · 失败 \(result.failed) 包 · 未执行 \(result.remaining) 包").font(.callout.weight(.medium))
+                        Spacer()
+                        Button("关闭结果") { model.batchResult = nil }.buttonStyle(.plain).font(.caption)
+                    }
+                    if result.failed > 0 {
+                        DisclosureGroup("查看失败原因") {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(Array(result.outcomes.enumerated()), id: \.offset) { _, item in
+                                        if let error = item.error { Text(item.name + "：" + error).font(.caption).textSelection(.enabled) }
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }.frame(maxHeight: 100)
+                        }
+                    }
+                }.padding(12).background(gold.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            }
+            Label("网易 DD · 同一整包只更新一次 · 可更新置顶，已是最新置底", systemImage: "arrow.up.arrow.down").font(.caption).foregroundStyle(.secondary)
             HStack {
                 TextField("搜索名称、文件夹或作者", text: $model.search).textFieldStyle(.roundedBorder).frame(maxWidth: 350)
                 Spacer()
@@ -346,40 +386,10 @@ struct ContentView: View {
                     Button(model.target == nil ? "选择游戏目录" : "导入 ZIP") { if model.target == nil { model.chooseDirectory() } else { model.importZIP() } }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(40)
             } else {
-                Table(model.visible, selection: $model.selected) {
-                    TableColumn("插件") { addon in
-                        VStack(alignment: .leading, spacing: 4) { Text(addon.title).fontWeight(.medium); Text(addon.folder).font(.caption).foregroundStyle(.secondary) }.padding(.vertical, 5)
-                    }.width(min: 180, ideal: 260)
-                    TableColumn("本地 TOC 版本", value: \.version).width(min: 95, ideal: 115)
-                    TableColumn("作者", value: \.author).width(min: 90, ideal: 130)
-                    TableColumn("DD 整包版本") { addon in
-                        if let package = model.installedUpdates[addon.folder]?.packageInfo {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("已装包：\(package.installedVersionText)").foregroundStyle(.secondary)
-                                Text("最新包：\(package.latestVersion)").foregroundStyle(gold)
-                                Text(package.name).foregroundStyle(.secondary).lineLimit(1)
-                            }.font(.caption).padding(.vertical, 4)
-                                .help("所属 DD 包：\(package.name)\n已装整包：\(package.installedVersionText)\n最新整包：\(package.latestVersion)\n此处是发布包版本，各子目录的 TOC 版本独立显示。")
-                        } else { Text("—").foregroundStyle(.secondary) }
-                    }.width(min: 190, ideal: 230)
-                    TableColumn("状态 / 操作") { addon in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(model.installedUpdates[addon.folder]?.label ?? "等待检查").font(.caption).lineLimit(2)
-                            if model.installedUpdates[addon.folder]?.ddSelection != nil {
-                                Button { model.updateInstalled(addon) } label: {
-                                    Label(model.installedUpdates[addon.folder]?.packageInfo?.containsMultipleFolders == true ? "更新整包" : "更新", systemImage: "arrow.down.to.line").font(.system(size: 11, weight: .semibold))
-                                        .padding(.horizontal, 12).padding(.vertical, 5).foregroundStyle(.black)
-                                        .background(gold.gradient, in: Capsule())
-                                }.buttonStyle(.plain)
-                            } else if let url = model.installedUpdates[addon.folder]?.externalURL, model.installedUpdates[addon.folder]?.isCurrent != true {
-                                Link(destination: url) {
-                                    Label("前往 DD", systemImage: "arrow.up.right").font(.system(size: 11, weight: .semibold))
-                                        .padding(.horizontal, 11).padding(.vertical, 5).foregroundStyle(gold)
-                                        .background(gold.opacity(0.12), in: Capsule())
-                                }
-                            }
-                        }.padding(.vertical, 4)
-                    }.width(min: 140, ideal: 180)
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(model.visiblePackages) { row in packageCard(row) }
+                    }.padding(.vertical, 4)
                 }.frame(minHeight: 200)
                 if model.selected.count == 1, let addon = model.addons.first(where: { model.selected.contains($0.folder) }) {
                     VStack(alignment: .leading, spacing: 6) {
@@ -397,6 +407,64 @@ struct ContentView: View {
             }
             Label("本地 TOC 与 DD 整包版本分别显示；子模块随所属包一起更新，安装前自动备份。", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
         }
+    }
+    private func packageCard(_ row: AddonPackageRow) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 14) {
+                Toggle("选择整包", isOn: Binding(get: {
+                    row.members.allSatisfy { model.selected.contains($0.folder) }
+                }, set: { selected in
+                    let folders = Set(row.members.map(\.folder))
+                    if selected { model.selected.formUnion(folders) } else { model.selected.subtract(folders) }
+                })).labelsHidden().toggleStyle(.checkbox)
+                Button {
+                    if expandedPackages.contains(row.id) { expandedPackages.remove(row.id) } else { expandedPackages.insert(row.id) }
+                } label: {
+                    Image(systemName: expandedPackages.contains(row.id) ? "chevron.down" : "chevron.right").frame(width: 16)
+                }.buttonStyle(.plain).help("展开子目录与各自的 TOC 版本")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(row.title).font(.headline)
+                    Text("\(row.members.count) 个本地目录" + (row.info == nil ? " · 未识别整包来源" : " · DD 整包")).font(.caption).foregroundStyle(.secondary)
+                    if row.members.count == 1, let addon = row.members.first {
+                        Text("本地 TOC：\(addon.version) · \(addon.folder)").font(.caption).foregroundStyle(.secondary)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                if let info = row.info {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("已装包：\(info.installedVersionText)").foregroundStyle(.secondary)
+                        Text("最新包：\(info.latestVersion)").foregroundStyle(gold)
+                    }.font(.caption).frame(width: 175, alignment: .leading)
+                }
+                VStack(alignment: .trailing, spacing: 7) {
+                    Text(row.label).font(.caption).foregroundStyle(row.canUpdate ? gold : .secondary)
+                    if row.canUpdate {
+                        Button { model.updatePackage(row) } label: {
+                            Label("更新整包", systemImage: "arrow.down.to.line").font(.system(size: 12, weight: .semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 7).foregroundStyle(.black).background(gold.gradient, in: Capsule())
+                        }.buttonStyle(.plain)
+                    } else if let url = row.members.compactMap({ model.installedUpdates[$0.folder]?.externalURL }).first, !row.isCurrent {
+                        Link("前往 DD ↗", destination: url).font(.caption).foregroundStyle(gold)
+                    }
+                }.frame(width: 155, alignment: .trailing)
+            }
+            if expandedPackages.contains(row.id) {
+                Divider()
+                Text("子目录 TOC 版本独立于整包版本；更新按钮会处理整个包。").font(.caption).foregroundStyle(.secondary)
+                ForEach(row.members) { addon in
+                    HStack {
+                        Toggle("选择 \(addon.folder)", isOn: Binding(get: { model.selected.contains(addon.folder) }, set: { checked in
+                            if checked { model.selected.insert(addon.folder) } else { model.selected.remove(addon.folder) }
+                        })).labelsHidden().toggleStyle(.checkbox)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(addon.title).font(.callout)
+                            Text(addon.folder).font(.caption).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        Text("本地 TOC：" + addon.version).font(.caption).frame(width: 180, alignment: .leading)
+                        Text(addon.author).font(.caption).foregroundStyle(.secondary).lineLimit(1).frame(width: 150, alignment: .trailing)
+                    }.padding(.vertical, 3)
+                }
+            }
+        }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
     }
     private var backupView: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -473,8 +541,8 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.8", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
-                Text("仅通过网易 DD 官方扫描查询并直接下载更新，无需密钥。插件库将可更新置顶、已是最新置底；在线页默认展示周热门，也可查看月热门与总下载排行。")
+                Label("艾泽拉斯插件管家 · v0.9", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Text("仅通过网易 DD 官方扫描查询并直接下载更新，无需密钥。插件库按整包分组，可更新置顶、已是最新置底；支持一键更新全部，单包失败继续其他任务；在线页默认展示周热门，也可查看月热门与总下载排行。")
                 Divider()
                 Text("自动检查与一键更新").font(.headline)
                 Text("每次启动、扫描或安装完成后自动检查。DD 使用 TOC 文件名和 MD5 扫描识别插件，并比较包版本 ID；不需要本地 DD 清单。本地 TOC 版本由各子目录声明，DD 版本属于整个发布包；二者分开显示，不用依赖插件或整包版本代替子模块版本。点击更新会复查版本、下载网易 CDN ZIP、检查大小与 ZIP 完整性，再向 DD 核对解压后的 TOC 版本和目录，最后备份整个 AddOns 并安装。DD 未提供整个 ZIP 的密码学摘要，TOC 匹配也不等于所有代码完全一致。")

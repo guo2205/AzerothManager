@@ -229,34 +229,52 @@ final class DDSourceTests: XCTestCase {
             ("52a6a9589c9c46988d200373ae2f25d9", "v12.1.0", "https://uires.w.163.com/file/52a6a9589c9c46988d200373ae2f25d9/!BugGrabber-v12.1.0.zip", 11093),
             ("b5ba1d2daddf4a2988e1367889799bb9", "3.90", "https://uires.w.163.com/file/addon/o4hU8oN8waeQZyfrBkqecf4O7PU52uF2/addon.zip", 1074004)
         ]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("Interface/AddOns")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        let client = DDClient(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
         for (fileID, version, url, size) in seeds {
-            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: root) }
-            let target = root.appendingPathComponent("Interface/AddOns")
-            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-            let client = DDClient(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
             var seed = package(file: fileID, url: url, size: size)
             var seedVersion = try XCTUnwrap(seed["latest_version"] as? [String: Any]); seedVersion["version"] = version
             seed["latest_version"] = seedVersion
             let seedSelection = try DDSelection(package: JSONDecoder().decode(DDScanPackage.self, from: json(seed)), flavor: .time)
             let oldArchive = try await client.download(seedSelection); defer { try? FileManager.default.removeItem(at: oldArchive) }
             let oldPreview = try library.prepare(oldArchive, target: target, flavor: .time); defer { library.discard(oldPreview) }
-            let names = oldPreview.folders.map(\.lastPathComponent).sorted()
             for folder in oldPreview.folders { try FileManager.default.copyItem(at: folder, to: target.appendingPathComponent(folder.lastPathComponent)) }
-            let addons = try AddonScanner.scan(target, flavor: .time)
-            let items = try await client.check(target: target, addons: addons, flavor: .time)
-            let update = try XCTUnwrap(items[names[0]]), selection = try XCTUnwrap(update.ddSelection)
-            let refreshed = try await client.refresh(selection, target: target, expected: update.expected)
+        }
+        let addons = try AddonScanner.scan(target, flavor: .time)
+        let items = try await client.check(target: target, addons: addons, flavor: .time)
+        let groups = InstalledUpdates.packages(addons, updates: items)
+        let jobs = groups.compactMap { row -> PackageUpdateJob? in
+            guard let update = row.update, let selection = update.ddSelection else { return nil }
+            return PackageUpdateJob(selection: selection, expected: update.expected)
+        }
+        XCTAssertEqual(jobs.count, 2)
+        XCTAssertEqual(groups.count, 2)
+        XCTAssertEqual(addons.count, 11)
+        let result = await PackageBatch.run(jobs, operation: { job in
+            let refreshed = try await client.refresh(job.selection, target: target, expected: job.expected)
             let archive = try await client.download(refreshed); defer { try? FileManager.default.removeItem(at: archive) }
             let preview = try library.prepare(archive, target: target, flavor: .time); defer { library.discard(preview) }
             try await client.verify(preview, selection: refreshed)
-            try library.install(preview, target: target, expected: update.expected, dd: refreshed)
-            XCTAssertEqual(try DDTracking.receipts(in: target).first?.fileID, selection.version.sn)
-            XCTAssertEqual(try DDTracking.receipts(in: target).first?.folders.count, names.count)
-            XCTAssertEqual(try library.snapshots(for: target).count, 1)
-            let result = try await client.check(target: target, addons: AddonScanner.scan(target, flavor: .time), flavor: .time)
-            XCTAssertTrue(result.values.allSatisfy { $0.isCurrent && $0.ddSelection == nil })
-            print("LIVE DD: \(selection.package.name) \(selection.package.local_version ?? "unknown") -> \(selection.version.version), \(names.count) folders; download, verify, backup, install, recheck passed")
+            try library.install(preview, target: target, expected: job.expected, dd: refreshed)
+        })
+        XCTAssertEqual(result.succeeded, 2, result.outcomes.compactMap(\.error).joined(separator: "\n"))
+        XCTAssertEqual(result.failed, 0); XCTAssertFalse(result.cancelled)
+        let receipts = try DDTracking.receipts(in: target)
+        XCTAssertEqual(receipts.count, 2)
+        XCTAssertEqual(try library.snapshots(for: target).count, 2)
+        let checked = try await client.check(target: target, addons: AddonScanner.scan(target, flavor: .time), flavor: .time)
+        let installedFolders = Set(receipts.flatMap(\.folders))
+        XCTAssertFalse(installedFolders.isEmpty)
+        for folder in installedFolders {
+            XCTAssertEqual(checked[folder]?.isCurrent, true, folder + ": " + (checked[folder]?.label ?? "missing"))
+            XCTAssertNil(checked[folder]?.ddSelection)
         }
+        // 新版移除的旧目录保持原样，单独显示未识别；不为了让测试全绿而删除用户文件。
+        let retainedOldFolders = Set(checked.keys).subtracting(installedFolders)
+        XCTAssertTrue(retainedOldFolders.isSubset(of: Set(addons.map(\.folder))))
+        print("LIVE DD BATCH: 11 old folders grouped into 2 jobs; 2 successful updates and snapshots, \(installedFolders.count) installed folders current, \(retainedOldFolders.count) obsolete folders preserved")
     }
 }
