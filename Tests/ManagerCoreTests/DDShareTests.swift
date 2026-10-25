@@ -92,9 +92,35 @@ final class DDShareTests: XCTestCase {
                 return {ok: true, text: async () => '{"code":409}'};
             };
             """)
-            context.evaluateScript("(async () => {\(DDShareClient.authenticatedDetailScript)})().catch(error => failure = error.message)")
+            context.evaluateScript("(async () => {\(DDShareClient.authenticatedDetailScript)})().then(value => failure = value)")
             XCTAssertEqual(context.evaluateScript("calls.length")?.toInt32(), endpoint.contains("evil.test") ? 0 : 1)
             XCTAssertNotEqual(context.objectForKeyedSubscript("failure")?.toString(), "null")
+            let response = try XCTUnwrap(context.objectForKeyedSubscript("failure")?.toString())
+            XCTAssertThrowsError(try DDShareClient.decodeAuthenticatedDetail(Data(response.utf8)))
         }
+    }
+    func testSignatureRefusalIsNotReportedAsAccountPermission() throws {
+        let data = try data(["stage": "login", "code": 409, "reason": "signature"])
+        XCTAssertThrowsError(try DDShareClient.decodeAuthenticatedDetail(data)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("签名"))
+            XCTAssertTrue(error.localizedDescription.contains("不是账号权限"))
+        }
+        for stage in ["endpoint", "login", "detail"] {
+            XCTAssertThrowsError(try DDShareClient.decodeAuthenticatedDetail(self.data(["stage": stage, "code": -1, "reason": "request"])))
+        }
+    }
+    func testLoginFailureReturnsSanitizedDiagnosticInsteadOfJavaScriptException() throws {
+        let context = try XCTUnwrap(JSContext())
+        context.evaluateScript("""
+        var output = null, failure = null, count = 0;
+        var endpoint = 'https://uiapi.w.163.com/share/detail?sn=\(sn)';
+        var fetch = async () => { count++; return {ok: true, text: async () =>
+            JSON.stringify({code: 409, msg: '签名无效', result: {token: 'must-not-escape'}})}; };
+        """)
+        context.evaluateScript("(async () => {\(DDShareClient.authenticatedDetailScript)})().then(value => output = value).catch(error => failure = String(error))")
+        let result = try XCTUnwrap(context.objectForKeyedSubscript("output")?.toString())
+        XCTAssertTrue(result.contains("signature")); XCTAssertFalse(result.contains("must-not-escape"))
+        XCTAssertEqual(context.objectForKeyedSubscript("failure")?.toString(), "null")
+        XCTAssertEqual(context.evaluateScript("count")?.toInt32(), 1)
     }
 }

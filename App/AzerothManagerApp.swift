@@ -684,7 +684,7 @@ struct ContentView: View {
             }
         }
         guard let string = text as? String else { throw ManagerError("无法读取官方分享响应") }
-        return try DDShareClient.decodeDetail(Data(string.utf8))
+        return try DDShareClient.decodeAuthenticatedDetail(Data(string.utf8))
     }
 }
 struct DDShareLoginView: NSViewRepresentable {

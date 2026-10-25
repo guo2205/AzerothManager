@@ -64,6 +64,8 @@ private struct DDShareResponse<T: Decodable>: Decodable { let code: Int; let msg
 public struct DDShareClient: Sendable {
     /// 在官方网页的临时会话内完成插件登录。凭据不返回 Swift、不写入磁盘。
     public static let authenticatedDetailScript = #"""
+    let stage = 'endpoint';
+    try {
     async function readJSON(url, headers = {}) {
         const response = await fetch(url, {credentials: 'include', cache: 'no-store', redirect: 'error', headers});
         if (!response.ok) throw new Error('网易 DD 接口请求失败，请稍后重试');
@@ -74,13 +76,36 @@ public struct DDShareClient: Sendable {
     // 只允许向已确认的官方插件接口发送临时凭据，拒绝重定向。
     if (typeof endpoint !== 'string' || !endpoint.startsWith('https://uiapi.w.163.com/share/detail?'))
         throw new Error('分享接口地址无效');
+    stage = 'login';
     const login = await readJSON('https://uiapi.w.163.com/login/dslogin?ef=0&uf=0&ts=0&ab=0');
     if (login.code !== 0 || typeof login.result?.token !== 'string' || !login.result.token)
-        throw new Error('DD 网页已登录，但插件服务登录未完成；当前网页会话可能不支持此登录方式');
+        return JSON.stringify({stage: 'login', code: Number.isInteger(login.code) ? login.code : -1,
+            reason: login.code === 409 && typeof login.msg === 'string' && login.msg.includes('签名') ? 'signature' : 'session'});
+    stage = 'detail';
     const detail = await readJSON(endpoint, {'x-w163-token': login.result.token});
     // 仅传回分享数据，不传回登录响应或临时凭据。
     return JSON.stringify({code: detail.code, result: detail.result});
+    } catch (_) {
+        // 不把浏览器异常或服务器原始错误文本带回原生层。
+        return JSON.stringify({stage, code: -1, reason: 'request'});
+    }
     """#
+    public static func decodeAuthenticatedDetail(_ data: Data) throws -> DDShareDetail {
+        struct Diagnostic: Decodable { let stage: String?; let code: Int?; let reason: String? }
+        guard data.count <= 16 * 1024 * 1024 else { throw ManagerError("DD 配置分享响应超过限制") }
+        let diagnostic = try? JSONDecoder().decode(Diagnostic.self, from: data)
+        if let stage = diagnostic?.stage {
+            if stage == "login", diagnostic?.code == 409, diagnostic?.reason == "signature" {
+                throw ManagerError("插件服务拒绝请求签名（409），不是账号权限结论；重复网页登录不能解决此问题，尚需支持的签名接入方式。")
+            }
+            if stage == "login", diagnostic?.reason == "session" {
+                throw ManagerError("网页登录与插件服务会话未衔接，尚未取得插件登录凭据。")
+            }
+            let location = stage == "login" ? "插件登录" : stage == "detail" ? "分享详情" : "接口地址检查"
+            throw ManagerError("\(location)阶段未完成请求，可能是网络、跨域或响应格式问题；未取得下载地址。")
+        }
+        return try decodeDetail(data)
+    }
     private let session: URLSession
     public init(configuration: URLSessionConfiguration = .ephemeral) {
         configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil; configuration.urlCache = nil
