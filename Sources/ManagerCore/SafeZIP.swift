@@ -8,7 +8,7 @@ public enum SafeZIP {
         let path: String; let directory: Bool; let method: Int; let crc: UInt32
         let packed: Int; let size: Int; let offset: Int; let flags: Int; let name: Data
     }
-    static func entries(_ data: Data) throws -> [Entry] {
+    static func entries(_ data: Data, newBeeCompatibility: Bool = false) throws -> [Entry] {
         func fail() -> ManagerError { ManagerError("ZIP 格式无效或不受支持（仅支持普通 UTF-8 ZIP，不支持加密、分卷、ZIP64 或链接）") }
         func u16(_ i: Int) throws -> Int {
             guard i >= 0, i + 2 <= data.count else { throw fail() }
@@ -25,6 +25,7 @@ public enum SafeZIP {
         guard count > 0, count <= 20000, try u16(e + 8) == count, centralStart + centralSize == e else { throw fail() }
         var p = centralStart, total = 0, found: [Entry] = [], names = Set<String>(), ranges: [Range<Int>] = []
         for _ in 0..<count {
+            try Task.checkCancellation()
             guard try u32(p) == 0x02014b50 else { throw fail() }
             let flags = try u16(p + 8), method = try u16(p + 10), crc = try u32(p + 16)
             let packed = try u32(p + 20), size = try u32(p + 24), nl = try u16(p + 28), el = try u16(p + 30), cl = try u16(p + 32)
@@ -33,14 +34,19 @@ public enum SafeZIP {
                   flags & ~0x080e == 0, flags & 1 == 0, method == 0 || method == 8,
                   packed != 0xffffffff, size <= 128 * 1024 * 1024, offset < centralStart else { throw fail() }
             let nameData = data.subdata(in: p + 46..<p + 46 + nl)
-            guard let name = String(data: nameData, encoding: .utf8), !name.contains("\\"), !name.hasPrefix("/"), !name.contains(":"), !name.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw fail() }
+            let legacyEncoding = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+            guard let originalName = String(data: nameData, encoding: .utf8) ?? (newBeeCompatibility ? String(data: nameData, encoding: legacyEncoding) : nil) else { throw fail() }
+            let normalizedName = originalName.replacingOccurrences(of: "\\", with: "/")
+            let ignoredMarker = newBeeCompatibility && normalizedName.split(separator: "/").last == "addon_version.txt"
+            let name = ignoredMarker ? normalizedName : originalName
+            guard !name.contains("\\"), !name.hasPrefix("/"), !name.contains(":"), !name.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw fail() }
             let isDir = name.hasSuffix("/"), path = isDir ? String(name.dropLast()) : name
             let parts = path.split(separator: "/", omittingEmptySubsequences: false)
             guard !parts.isEmpty, parts.count <= 32, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= 255 }), path.utf8.count <= 2048 else { throw fail() }
             let kind = (attr >> 16) & 0xf000
             guard kind == 0 || kind == (isDir ? 0x4000 : 0x8000), !isDir || size == 0 else { throw fail() }
             let key = path.precomposedStringWithCanonicalMapping.lowercased()
-            guard names.insert(key).inserted else { throw ManagerError("ZIP 含重复或大小写冲突路径") }
+            guard names.insert(key).inserted || ignoredMarker else { throw ManagerError("ZIP 含重复或大小写冲突路径") }
             total += size
             guard total <= 1024 * 1024 * 1024 else { throw ManagerError("ZIP 解压后不能超过 1 GB") }
             guard try u32(offset) == 0x04034b50, try u16(offset + 6) == flags, try u16(offset + 8) == method else { throw fail() }
@@ -66,16 +72,17 @@ public enum SafeZIP {
         }
         return found
     }
-    public static func extract(_ archive: URL, into destination: URL) throws {
+    public static func extract(_ archive: URL, into destination: URL, newBeeCompatibility: Bool = false) throws {
         let fm = FileManager.default
         let attrs = try fm.attributesOfItem(atPath: archive.path)
         guard ((attrs[.size] as? NSNumber)?.intValue ?? Int.max) <= 256 * 1024 * 1024 else { throw ManagerError("ZIP 最大支持 256 MB") }
         let data = try Data(contentsOf: archive)
-        let list = try entries(data)
+        let list = try entries(data, newBeeCompatibility: newBeeCompatibility)
         guard !fm.fileExists(atPath: destination.path) else { throw ManagerError("解压目标必须是全新目录") }
         try fm.createDirectory(at: destination, withIntermediateDirectories: true)
         do {
             for item in list {
+                try Task.checkCancellation()
                 let target = destination.appendingPathComponent(item.path)
                 if item.directory { try fm.createDirectory(at: target, withIntermediateDirectories: true); continue }
                 var output = Data(count: max(1, item.size))
@@ -91,6 +98,8 @@ public enum SafeZIP {
                 }
                 let crc = output.withUnsafeBytes { wow_crc($0.bindMemory(to: UInt8.self).baseAddress, output.count) }
                 guard crc == item.crc else { throw ManagerError("ZIP 校验失败，文件可能损坏") }
+                // 新手盒子重复追加的来源标记不属于插件正文；仍核对原始条目的边界、大小、类型和 CRC。
+                if newBeeCompatibility && item.path.split(separator: "/").last == "addon_version.txt" { continue }
                 try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try output.write(to: target, options: .withoutOverwriting)
             }

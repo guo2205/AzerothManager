@@ -42,14 +42,18 @@ public enum AddonScanner {
         try FileSafety.checkTree(directory)
         return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]).filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }.sorted { $0.lastPathComponent < $1.lastPathComponent }.compactMap { folder in
             let name = folder.lastPathComponent
-            let tocs = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension.lowercased() == "toc" && ($0.deletingPathExtension().lastPathComponent.lowercased() == name.lowercased() || $0.lastPathComponent.lowercased().hasPrefix(name.lowercased() + "_")) }
+            let tocs = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension.lowercased() == "toc" && ($0.deletingPathExtension().lastPathComponent.lowercased() == name.lowercased() || $0.lastPathComponent.lowercased().hasPrefix(name.lowercased() + "_") || $0.lastPathComponent.lowercased().hasPrefix(name.lowercased() + "-")) }
             guard !tocs.isEmpty else { return nil }
             let ordered = tocs.sorted { a, b in
                 func rank(_ u: URL) -> Int {
                     let stem = u.deletingPathExtension().lastPathComponent.lowercased()
                     if stem == name.lowercased() { return 1 }
-                    if flavor == .retail && stem.hasSuffix("_mainline") { return 0 }
-                    return 2
+                    if flavor == .retail && (stem.hasSuffix("_mainline") || stem.hasSuffix("-mainline")) { return 0 }
+                    if flavor == .time && (stem.hasSuffix("_titan") || stem.hasSuffix("-titan")) { return 0 }
+                    if flavor == .time && (stem.hasSuffix("_wrath") || stem.hasSuffix("-wrath")) { return 2 }
+                    if flavor == .time && (stem.hasSuffix("_classic") || stem.hasSuffix("-classic")) { return 3 }
+                    if flavor == .time && (stem.hasSuffix("_vanilla") || stem.hasSuffix("-vanilla")) { return 4 }
+                    return flavor == .time ? 5 : 2
                 }
                 return rank(a) == rank(b) ? a.lastPathComponent < b.lastPathComponent : rank(a) < rank(b)
             }

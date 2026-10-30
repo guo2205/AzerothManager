@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import ManagerCore
-import WebKit
 
 @main
 struct AzerothManagerApp: App {
@@ -54,6 +53,7 @@ struct Prompt: Identifiable {
                 let value = try await operation()
                 if Task.isCancelled {
                     if let preview = value as? InstallPreview { library.discard(preview) }
+                    if let preview = value as? ConfigurationPreview { ConfigurationLibrary().discard(preview) }
                     throw CancellationError()
                 }
                 busy = false; networkTask = nil; completion(value)
@@ -65,24 +65,6 @@ struct Prompt: Identifiable {
                     self.installedUpdates = self.installedUpdates.mapValues { $0.label == "检查中…" ? InstalledUpdate(label: "检查失败，请重试") : $0 }
                 }
             }
-        }
-    }
-    @Published var shareQuery = "297986"
-    @Published var sharePage: DDSharePage?
-    @Published var shareDetail: DDShareDetail?
-    @Published var shareMessage = "选择网易 DD 配置分享，读取内容后预览安装。"
-    func searchShares() {
-        let query = shareQuery, flavor = flavor
-        runNetwork("正在搜索 DD 配置分享…", operation: { try await DDShareClient().search(query, flavor: flavor) }) { page in
-            self.sharePage = page; self.shareDetail = nil
-            if page.shares.count == 1, let first = page.shares.first { self.loadShare(first.sn) }
-        }
-    }
-    func loadShare(_ sn: String) {
-        let flavor = flavor
-        runNetwork("正在读取 DD 分享详情…", operation: { try await DDShareClient().detail(sn, flavor: flavor) }) { detail in
-            self.shareDetail = detail
-            self.shareMessage = detail.hasConfigurationDownload ? "已读取配置下载信息，待检查安装内容" : "DD 暂未提供配置下载地址，请在官方页面登录后重新读取。"
         }
     }
     @Published var ddQuery = ""
@@ -139,7 +121,7 @@ struct Prompt: Identifiable {
         startPackageUpdates(jobs)
     }
     func startPackageUpdates(_ jobs: [PackageUpdateJob]) {
-        guard !busy, !jobs.isEmpty, let target, gameIsClosed(), jobs.allSatisfy({ $0.selection.flavor == flavor }) else { return }
+        guard !busy, !jobs.isEmpty, let target, configurationWritesAllowed(), jobs.allSatisfy({ $0.selection.flavor == flavor }) else { return }
         let flavor = flavor, library = library, client = DDClient()
         batchResult = nil; busy = true; status = "正在准备更新 \(jobs.count) 个插件包…"
         networkTask = Task {
@@ -147,7 +129,7 @@ struct Prompt: Identifiable {
                 self.status = "更新 \(index)/\(total)：\(name) · 下载、校验、备份并安装"
             }, operation: { job in
                 guard self.target == target, self.flavor == flavor else { throw CancellationError() }
-                guard self.gameIsClosed() else { throw CancellationError() }
+                guard self.configurationWritesAllowed() else { throw CancellationError() }
                 let refreshed = try await client.refresh(job.selection, target: target, expected: job.expected)
                 let archive = try await client.download(refreshed)
                 defer { try? FileManager.default.removeItem(at: archive) }
@@ -156,7 +138,7 @@ struct Prompt: Identifiable {
                 try Task.checkCancellation()
                 try await client.verify(preview, selection: refreshed)
                 try Task.checkCancellation()
-                guard self.target == target, self.flavor == flavor, self.gameIsClosed() else { throw CancellationError() }
+                guard self.target == target, self.flavor == flavor, self.configurationWritesAllowed() else { throw CancellationError() }
                 // 文件事务开始后不再取消，确保本包完成或回滚；取消会在下一包生效。
                 try await Task.detached { try library.install(preview, target: target, expected: job.expected, dd: refreshed) }.value
             })
@@ -212,6 +194,16 @@ struct Prompt: Identifiable {
         UserDefaults.standard.set(url.path, forKey: "target")
         showCandidates = false; refresh()
     }
+    func configurationWritesAllowed() -> Bool {
+        guard gameIsClosed() else { return false }
+        if let target {
+            let root = target.deletingLastPathComponent().deletingLastPathComponent()
+            do {
+                if try ConfigurationLibrary().hasPendingTransaction(in: root) { error = "存在未恢复的配置安装，请在配置分享页恢复中断安装。"; return false }
+            } catch { self.error = error.localizedDescription; return false }
+        }
+        return true
+    }
     func gameIsClosed() -> Bool {
         if NSWorkspace.shared.runningApplications.contains(where: { ($0.localizedName ?? "").localizedCaseInsensitiveContains("warcraft") || ($0.localizedName ?? "").contains("魔兽世界") }) {
             error = "请先退出《魔兽世界》，再修改插件文件。"; return false
@@ -219,7 +211,7 @@ struct Prompt: Identifiable {
         return true
     }
     func importZIP() {
-        guard let target, gameIsClosed() else { return }
+        guard let target, configurationWritesAllowed() else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.zip]; panel.allowsMultipleSelection = false
         panel.title = "导入插件 ZIP"
         guard panel.runModal() == .OK, let archive = panel.url else { return }
@@ -227,7 +219,7 @@ struct Prompt: Identifiable {
         run("正在检查 ZIP 安全性与插件结构…", operation: { try library.prepare(archive, target: target, flavor: flavor) }) { preview in
             self.status = "ZIP 检查完成，等待确认"
             self.prompt = Prompt(title: "安装 \(preview.folders.count) 个插件？", message: "目标：\(target.path)\n\n安装：\(preview.folders.map(\.lastPathComponent).joined(separator: "、"))\n\n覆盖：\(preview.replacing.isEmpty ? "无" : preview.replacing.joined(separator: "、"))\n\n将先备份全部插件。文件夹会整体替换，请确认版本适用于当前客户端。", confirm: "备份并安装", destructive: false, action: {
-                guard self.gameIsClosed() else { library.discard(preview); return }
+                guard self.configurationWritesAllowed() else { library.discard(preview); return }
                 self.run("正在备份并安装…", operation: {
                     defer { library.discard(preview) }
                     try library.install(preview, target: target)
@@ -236,23 +228,23 @@ struct Prompt: Identifiable {
         }
     }
     func uninstall() {
-        guard let target, !selected.isEmpty, gameIsClosed() else { return }
+        guard let target, !selected.isEmpty, configurationWritesAllowed() else { return }
         let folders = selected.sorted(), library = library
         prompt = Prompt(title: "卸载 \(folders.count) 个插件？", message: folders.joined(separator: "、") + "\n\n将先备份全部插件。依赖这些插件的其他插件可能无法正常使用。WTF 设置不会删除。", confirm: "备份并卸载", destructive: true, action: {
-            guard self.gameIsClosed() else { return }
+            guard self.configurationWritesAllowed() else { return }
             self.run("正在备份并卸载…", operation: { try library.uninstall(folders, target: target) }) { self.refresh() }
         })
     }
     func backup() {
-        guard let target, gameIsClosed() else { return }
+        guard let target, configurationWritesAllowed() else { return }
         let library = library
         run("正在创建完整插件备份…", operation: { try library.backup(target, reason: "手动备份") }) { _ in self.refresh() }
     }
     func restore(_ snapshot: Snapshot) {
-        guard let target, gameIsClosed() else { return }
+        guard let target, configurationWritesAllowed() else { return }
         let library = library
         prompt = Prompt(title: "恢复这份备份？", message: "\(snapshot.date.formatted())\n\n将整体替换当前 AddOns，备份后新增的插件也会移除。恢复前会再备份当前插件。WTF 设置不在备份范围。", confirm: "备份当前并恢复", destructive: true, action: {
-            guard self.gameIsClosed() else { return }
+            guard self.configurationWritesAllowed() else { return }
             self.run("正在恢复插件…", operation: { try library.restore(snapshot, target: target) }) { self.refresh() }
         })
     }
@@ -261,8 +253,11 @@ struct Prompt: Identifiable {
 struct ContentView: View {
     @ObservedObject var model: ManagerModel
     @State private var page = "插件库"
-    @StateObject private var ddShareSession = DDShareWebSession()
-    @State private var showShareLogin = false
+    @StateObject private var newBee: NewBeeShareController
+    init(model: ManagerModel) {
+        self.model = model
+        _newBee = StateObject(wrappedValue: NewBeeShareController(manager: model))
+    }
     @State private var expandedPackages: Set<String> = []
     private let gold = Color(red: 0.89, green: 0.70, blue: 0.39)
     var body: some View {
@@ -292,7 +287,7 @@ struct ContentView: View {
                 header
                 if page == "插件库" { libraryView }
                 else if page == "在线插件" { onlineView }
-                else if page == "配置分享" { shareView }
+                else if page == "配置分享" { NewBeeShareView(controller: newBee, manager: model) }
                 else if page == "备份与恢复" { backupView }
                 else { aboutView }
                 Spacer(minLength: 0)
@@ -301,7 +296,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.10.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.11.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -315,33 +310,8 @@ struct ContentView: View {
         .alert(item: $model.prompt) { prompt in
             Alert(title: Text(prompt.title), message: Text(prompt.message), primaryButton: prompt.destructive ? .destructive(Text(prompt.confirm), action: prompt.action) : .default(Text(prompt.confirm), action: prompt.action), secondaryButton: .cancel(Text("取消"), action: prompt.cancel))
         }
-        .sheet(isPresented: $showShareLogin) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("网易 DD 官方登录与分享详情").font(.headline)
-                    Spacer()
-                    Button("关闭") { showShareLogin = false }
-                }
-                Text("请在官方网页完成登录。本应用不接收密码，登录状态只用于本次会话，不保存到源码或钥匙串。").font(.caption).foregroundStyle(.secondary)
-                DDShareLoginView(session: ddShareSession)
-                HStack {
-                    Text(ddShareSession.message).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("已登录，读取下载信息") {
-                        guard let detail = model.shareDetail else { return }
-                        Task {
-                            do {
-                                let value = try await ddShareSession.readDetail(detail.sn)
-                                guard value.game_type == DDClient.gameType(model.flavor), value.sn == detail.sn else { throw ManagerError("分享客户端与当前目录不匹配") }
-                                model.shareDetail = value
-                                model.shareMessage = value.hasConfigurationDownload ? "已取得配置下载信息，等待安装预览" : "插件服务已完成登录，但分享接口仍未返回配置下载地址；尚不能安装。"
-                                ddShareSession.message = model.shareMessage
-                                if value.hasConfigurationDownload { showShareLogin = false }
-                            } catch { ddShareSession.message = ddShareSession.failureMessage(error) }
-                        }
-                    }
-                }
-            }.padding(20).frame(width: 1080, height: 750)
+        .sheet(isPresented: $newBee.showLogin, onDismiss: { if !newBee.authenticated { newBee.closeLogin() } }) {
+            NewBeeLoginView(controller: newBee, manager: model)
         }
         .sheet(isPresented: $model.showCandidates) {
             VStack(alignment: .leading, spacing: 18) {
@@ -537,46 +507,6 @@ struct ContentView: View {
             }.listStyle(.inset)
         }
     }
-    private var shareView: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("网易 DD 配置分享").font(.title2.bold())
-            HStack {
-                TextField("分享码、标题或作者（露露 NDui：297986）", text: $model.shareQuery).textFieldStyle(.roundedBorder).onSubmit { model.searchShares() }
-                Button("搜索分享", action: model.searchShares)
-            }
-            Text("露露 NDui 时光服分享码：297986。当前支持查询详情与验证官方登录，配置下载安装尚未开放，不会修改 WTF。").font(.caption).foregroundStyle(.secondary)
-            if let detail = model.shareDetail {
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(detail.title).font(.headline)
-                        Text("作者：\(detail.user_nick ?? "未知") · 分享码：\(detail.share_code ?? "未知")").font(.callout)
-                        Text(detail.brief_desc ?? "").foregroundStyle(.secondary)
-                        Text("插件：\(detail.known_addon?.items?.count ?? 0) 项 · 配置：\(ByteCountFormatter.string(fromByteCount: Int64(detail.wtf?.size ?? 0), countStyle: .file))")
-                        Text(model.shareMessage).font(.callout).foregroundStyle(gold)
-                        if detail.requiresPurchase { Text("此分享需要购买或粉丝权限，请在 DD 官方平台处理。").foregroundStyle(.orange) }
-                        HStack {
-                            Button("在 DD 官方页面登录并读取") { ddShareSession.open(detail.website); showShareLogin = true }
-                            Link("在浏览器查看分享", destination: detail.website)
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                }
-            }
-            ScrollView {
-                LazyVStack(spacing: 10) {
-                    ForEach(model.sharePage?.shares ?? []) { item in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(item.title).font(.headline)
-                                Text(item.user_nick ?? "未知作者").font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Button("读取详情") { model.loadShare(item.sn) }
-                        }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-                    }
-                }
-            }
-        }
-    }
     private var onlineView: some View { ddOnlineView }
     private var ddOnlineView: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -631,7 +561,7 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.10", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Label("艾泽拉斯插件管家 · v0.11", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
                 Text("仅通过网易 DD 官方扫描查询并直接下载更新，无需密钥。插件库按整包分组，可更新置顶、已是最新置底；支持一键更新全部，单包失败继续其他任务；在线页默认展示周热门，也可查看月热门与总下载排行。")
                 Divider()
                 Text("自动检查与一键更新").font(.headline)
@@ -642,53 +572,4 @@ struct ContentView: View {
         }
     }
 
-}
-
-@MainActor final class DDShareWebSession: NSObject, ObservableObject, WKUIDelegate {
-    let webView: WKWebView
-    @Published var message = "请在网易官方页面登录，完成后点击读取安装内容。"
-    override init() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        super.init()
-        webView.uiDelegate = self
-    }
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // 官方网站的登录入口使用新窗口，在同一临时会话中打开。
-        if navigationAction.targetFrame == nil,
-           let url = navigationAction.request.url,
-           url.scheme == "https", url.host == "dd.163.com" {
-            webView.load(navigationAction.request)
-        }
-        return nil
-    }
-    func open(_ url: URL) {
-        guard url.scheme == "https", url.host == "dd.163.com" else { return }
-        webView.load(URLRequest(url: url))
-    }
-    func failureMessage(_ error: Error) -> String {
-        let detail = (error as NSError).userInfo["WKJavaScriptExceptionMessage"] as? String
-        // 仅显示本应用定义的固定诊断；不展示网页登录响应、Cookie 或令牌。
-        let known = ["网易 DD 接口请求失败，请稍后重试", "DD 响应超过限制", "DD 响应格式无法识别", "分享接口地址无效", "DD 网页已登录，但插件服务登录未完成；当前网页会话可能不支持此登录方式"]
-        if let detail, let message = known.first(where: { detail == $0 || detail == "Error: " + $0 }) { return message }
-        if (error as NSError).domain == WKError.errorDomain { return "官方网页未能完成插件接口请求，可能是跨域或会话限制；尚未取得下载地址。" }
-        return error.localizedDescription
-    }
-    func readDetail(_ sn: String) async throws -> DDShareDetail {
-        guard let url = webView.url, url.scheme == "https", url.host == "dd.163.com" else { throw ManagerError("请先回到网易 DD 官方分享页面") }
-        let endpoint = try DDShareClient.detailURL(sn)
-        let text: Any = try await withCheckedThrowingContinuation { continuation in
-            webView.callAsyncJavaScript(DDShareClient.authenticatedDetailScript, arguments: ["endpoint": endpoint.absoluteString], in: nil, in: .page) { result in
-                continuation.resume(with: result)
-            }
-        }
-        guard let string = text as? String else { throw ManagerError("无法读取官方分享响应") }
-        return try DDShareClient.decodeAuthenticatedDetail(Data(string.utf8))
-    }
-}
-struct DDShareLoginView: NSViewRepresentable {
-    let session: DDShareWebSession
-    func makeNSView(context: Context) -> WKWebView { session.webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
 }

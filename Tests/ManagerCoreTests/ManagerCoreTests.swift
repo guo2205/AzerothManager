@@ -25,6 +25,14 @@ final class ManagerCoreTests: XCTestCase {
         XCTAssertEqual(time.title, "中文"); XCTAssertEqual(time.interface, "123, 456"); XCTAssertEqual(time.dependencies, "Base")
         XCTAssertEqual(try AddonScanner.scan(target, flavor: .retail).first?.title, "Mainline")
     }
+    func testHyphenTOCChoosesMatchingClientBranch() throws {
+        let target = try target(), folder = target.appendingPathComponent("Demo")
+        try write("## Title: Wrath", folder.appendingPathComponent("Demo-Wrath.toc"))
+        try write("## Title: Vanilla", folder.appendingPathComponent("Demo-Vanilla.toc"))
+        try write("## Title: Retail", folder.appendingPathComponent("Demo-Mainline.toc"))
+        XCTAssertEqual(try AddonScanner.scan(target, flavor: .time).first?.title, "Wrath")
+        XCTAssertEqual(try AddonScanner.scan(target, flavor: .retail).first?.title, "Retail")
+    }
     func testDirectoryDiscoveryAndSymlinkRejection() throws {
         let target = try target()
         XCTAssertEqual(FileSafety.candidates(root.appendingPathComponent("Game")).map(\.path), [target.path])
@@ -92,6 +100,27 @@ final class ManagerCoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("Demo/stale.lua").path))
         XCTAssertEqual(try AddonScanner.scan(target, flavor: .time).first?.version, "2")
         XCTAssertEqual(try library.snapshots(for: target).count, 1)
+    }
+    func testNewBeeMarkersAreValidatedButNotInstalled() throws {
+        let archive = root.appendingPathComponent("newbee.zip"), output = root.appendingPathComponent("newbee")
+        try zip([("Demo/Demo.toc", Data("## Title: Demo".utf8)), ("Demo\\addon_version.txt", Data("1".utf8)), ("Demo\\addon_version.txt", Data("2".utf8))]).write(to: archive)
+        XCTAssertThrowsError(try SafeZIP.extract(archive, into: output))
+        try SafeZIP.extract(archive, into: output, newBeeCompatibility: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: output.appendingPathComponent("Demo/Demo.toc").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("Demo/addon_version.txt").path))
+        for paths in [["../addon_version.txt"], ["Demo/a.lua", "Demo/a.lua"], ["Demo\\main.lua"]] {
+            let bad = root.appendingPathComponent(UUID().uuidString + ".zip")
+            try zip(paths.map { ($0, Data("test".utf8)) }).write(to: bad)
+            XCTAssertThrowsError(try SafeZIP.extract(bad, into: root.appendingPathComponent(UUID().uuidString), newBeeCompatibility: true))
+        }
+    }
+    func testNewBeeLegacyFilenameRequiresExplicitCompatibility() throws {
+        // 两字节 GB18030 文件名，长度与占位名相同；同时修改本地头和目录头。
+        var data = zip([("Demo/ab.lua", Data("-- file".utf8))])
+        let marker = Data("Demo/ab.lua".utf8)
+        while let range = data.range(of: marker) { data.replaceSubrange(range, with: Data([68,101,109,111,47,0xd6,0xd0,46,108,117,97])) }
+        XCTAssertThrowsError(try SafeZIP.entries(data))
+        XCTAssertEqual(try SafeZIP.entries(data, newBeeCompatibility: true).first?.path, "Demo/中.lua")
     }
     func testTraversalAbsoluteDuplicatesAndLinksRejected() throws {
         for path in ["../escape", "/absolute", "Demo/../../escape", "C:/evil", "Demo\\evil", "Demo//evil", "Demo/./evil"] {

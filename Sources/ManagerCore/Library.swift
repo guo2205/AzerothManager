@@ -39,17 +39,17 @@ public final class Library {
         } catch { try? fm.removeItem(at: pending); throw error }
         return snapshot
     }
-    public func prepare(_ archive: URL, target: URL, flavor: Flavor) throws -> InstallPreview {
+    public func prepare(_ archive: URL, target: URL, flavor: Flavor, newBeeCompatibility: Bool = false) throws -> InstallPreview {
         try FileSafety.validateTarget(target)
         let staging = fm.temporaryDirectory.appendingPathComponent("AzerothImport-" + UUID().uuidString)
         do {
-            try SafeZIP.extract(archive, into: staging)
+            try SafeZIP.extract(archive, into: staging, newBeeCompatibility: newBeeCompatibility)
             var folders: [URL] = []
             func walk(_ dir: URL, depth: Int) throws {
                 guard depth <= 8 else { throw ManagerError("插件 ZIP 的目录层级过深") }
                 let children = try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
                 let name = dir.lastPathComponent.lowercased()
-                let hasTOC = children.contains { $0.pathExtension.lowercased() == "toc" && ($0.deletingPathExtension().lastPathComponent.lowercased() == name || $0.lastPathComponent.lowercased().hasPrefix(name + "_")) }
+                let hasTOC = children.contains { $0.pathExtension.lowercased() == "toc" && ($0.deletingPathExtension().lastPathComponent.lowercased() == name || $0.lastPathComponent.lowercased().hasPrefix(name + "_") || $0.lastPathComponent.lowercased().hasPrefix(name + "-")) }
                 if hasTOC { folders.append(dir); return }
                 for child in children where child.lastPathComponent != "__MACOSX" {
                     if try child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true { try walk(child, depth: depth + 1) }
