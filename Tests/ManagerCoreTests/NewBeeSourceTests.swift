@@ -98,6 +98,69 @@ final class NewBeeSourceTests: XCTestCase {
             catch { XCTAssertEqual(header.first, 1) }
         }
     }
+    func coreObject() -> [String: Any] {
+        ["id": 26150, "name": "桃桃 Core", "t_author_id": 657096, "game_version_id": 4, "is_content_access": true,
+         "file_list": [["release_type": 1, "file_display_name": "TaotaoCore_test", "file_name": "TaotaoCore_test", "file_url": "https://cdn8.newbeebox.com/mod_file/26150/TaotaoCore_test", "file_folders": ["TaotaoCore"]]]]
+    }
+    func testCoreRejectsWrongAuthorBranchPermissionAndDirectory() async throws {
+        for field in ["t_author_id", "game_version_id", "is_content_access", "file_list"] {
+            var item = coreObject()
+            switch field {
+            case "is_content_access": item[field] = false
+            case "file_list": item[field] = []
+            default: item[field] = 999
+            }
+            let invalid = item
+            NewBeeProtocol.handle = { _ in try self.json(["code": 1, "data": ["result": invalid]]) }
+            do { _ = try await client().taotaoCore(flavor: .time); XCTFail("Must reject " + field) } catch {}
+        }
+        do { _ = try await client().taotaoCore(flavor: .retail); XCTFail("Unverified retail branch") } catch {}
+    }
+    func testCoreInstallationPreservesWAAndOldCoreAndRejectsStalePreview() async throws {
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: root) }
+        let target = root.appendingPathComponent("Game/Interface/AddOns")
+        try fm.createDirectory(at: target.appendingPathComponent("VF_Core"), withIntermediateDirectories: true)
+        try Data("## Title: Old core".utf8).write(to: target.appendingPathComponent("VF_Core/VF_Core.toc"))
+        let wtf = root.appendingPathComponent("Game/WTF/personal.lua")
+        try fm.createDirectory(at: wtf.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("personal WA".utf8).write(to: wtf)
+        let archive = ManagerCoreTests().zip([("TaotaoCore/TaotaoCore.toc", Data("## Title: 桃桃Core\n## Version: test".utf8))])
+        NewBeeProtocol.handle = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return request.url?.host == "cdn8.newbeebox.com" ? archive : try self.json(["code": 1, "data": ["result": self.coreObject()]])
+        }
+        let api = client(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
+        let release = try await api.taotaoCore(flavor: .time)
+        let preview = try await api.prepareTaotaoCore(release, target: target, flavor: .time)
+        defer { library.discard(preview.installation) }
+        try NewBeeCoreInstallation.install(preview, library: library)
+        XCTAssertTrue(fm.fileExists(atPath: target.appendingPathComponent("TaotaoCore/TaotaoCore.toc").path))
+        XCTAssertTrue(fm.fileExists(atPath: target.appendingPathComponent("VF_Core/VF_Core.toc").path))
+        XCTAssertEqual(try Data(contentsOf: wtf), Data("personal WA".utf8))
+        XCTAssertEqual(try library.snapshots(for: target).count, 1)
+        let changed = try await api.prepareTaotaoCore(release, target: target, flavor: .time)
+        defer { library.discard(changed.installation) }
+        try Data("external".utf8).write(to: target.appendingPathComponent("new.txt"))
+        XCTAssertThrowsError(try NewBeeCoreInstallation.install(changed, library: library))
+    }
+    func testLiveCoreDownloadInstallAndRestoreInTemporaryDirectory() async throws {
+        guard ProcessInfo.processInfo.environment["AZEROTH_TAOTAO_LIVE_TEST"] == "1" else { throw XCTSkip("Explicit public Core download test") }
+        let fm = FileManager.default, root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: root) }
+        let target = root.appendingPathComponent("Game/Interface/AddOns")
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        let api = NewBeeClient(), library = Library(backupRoot: root.appendingPathComponent("Backups"))
+        let before = try AddonFingerprint.fingerprint(target)
+        let release = try await api.taotaoCore(flavor: .time)
+        let preview = try await api.prepareTaotaoCore(release, target: target, flavor: .time)
+        defer { library.discard(preview.installation) }
+        try NewBeeCoreInstallation.install(preview, library: library)
+        XCTAssertEqual(try AddonScanner.scan(target, flavor: .time).first?.folder, "TaotaoCore")
+        let snapshot = try XCTUnwrap(library.snapshots(for: target).first)
+        try library.restore(snapshot, target: target)
+        XCTAssertEqual(try AddonFingerprint.fingerprint(target), before)
+    }
     func testInvalidChunkSizesStopIndexDownload() async throws {
         NewBeeProtocol.handle = { request in
             if request.url!.path.hasSuffix("/meta") { return try self.json(["code": 1, "data": ["fileCount": 1, "totalSize": 1, "indexType": 1]]) }

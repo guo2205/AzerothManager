@@ -6,7 +6,7 @@ public struct Snapshot: Identifiable, Codable, Hashable {
     public let reason: String
     public let target: String
 }
-public struct InstallPreview {
+public struct InstallPreview: Sendable {
     public let staging: URL
     public let folders: [URL]
     public let replacing: [String]

@@ -53,6 +53,7 @@ struct Prompt: Identifiable {
                 let value = try await operation()
                 if Task.isCancelled {
                     if let preview = value as? InstallPreview { library.discard(preview) }
+                    if let preview = value as? NewBeeCorePreview { library.discard(preview.installation) }
                     if let preview = value as? ConfigurationPreview { ConfigurationLibrary().discard(preview) }
                     throw CancellationError()
                 }
@@ -210,6 +211,32 @@ struct Prompt: Identifiable {
         }
         return true
     }
+    @Published var taotaoRelease: NewBeePluginRelease?
+    func checkTaotaoCore() {
+        guard !busy else { return }
+        taotaoRelease = nil
+        let flavor = flavor
+        runNetwork("正在核对桃桃 Core 官方版本…", operation: { try await NewBeeClient().taotaoCore(flavor: flavor) }) { release in
+            guard self.flavor == flavor else { return }
+            self.taotaoRelease = release; self.status = "桃桃 Core：" + release.file.file_display_name
+        }
+    }
+    func installTaotaoCore() {
+        guard !busy, let target, let release = taotaoRelease, configurationWritesAllowed() else { return }
+        let flavor = flavor, library = library
+        runNetwork("正在下载并安全检查桃桃 Core…", operation: {
+            try await NewBeeClient().prepareTaotaoCore(release, target: target, flavor: flavor)
+        }) { preview in
+            guard self.target == target, self.flavor == flavor else { library.discard(preview.installation); return }
+            self.prompt = Prompt(title: "安装桃桃 Core 插件版", message: "版本：\(release.file.file_display_name)\n目标：\(target.path)\n安装目录：TaotaoCore\n\n将先备份整个 AddOns，再整体替换 TaotaoCore。保留 WTF 设置与现有职业 WA。\n作者要求在游戏内停用 VF_Core、VF_Interface、VF_HekiliFollower 三个旧核心组件，职业策略继续使用；管理器不会擅自删除它们。", confirm: "备份并安装", destructive: false, action: {
+                guard self.target == target, self.flavor == flavor, self.configurationWritesAllowed() else { library.discard(preview.installation); return }
+                self.run("正在备份并安装桃桃 Core…", operation: {
+                    defer { library.discard(preview.installation) }
+                    try NewBeeCoreInstallation.install(preview, library: library)
+                }) { self.refresh() }
+            }, cancel: { library.discard(preview.installation); self.status = "已取消桃桃 Core 安装" })
+        }
+    }
     func importZIP() {
         guard let target, configurationWritesAllowed() else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.zip]; panel.allowsMultipleSelection = false
@@ -296,7 +323,7 @@ struct ContentView: View {
                     if model.busy { ProgressView().controlSize(.small) }
                     else { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(gold) }
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
-                    Spacer(); Text("v0.11.0").font(.caption).foregroundStyle(.tertiary)
+                    Spacer(); Text("v0.12.0").font(.caption).foregroundStyle(.tertiary)
                 }
             }.padding(28).background(Color(red: 0.09, green: 0.10, blue: 0.12))
         }
@@ -507,7 +534,25 @@ struct ContentView: View {
             }.listStyle(.inset)
         }
     }
-    private var onlineView: some View { ddOnlineView }
+    private var onlineView: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("桃桃 Core · 插件版", systemImage: "puzzlepiece.extension.fill").font(.headline).foregroundStyle(gold)
+                    Spacer()
+                    Link("作者官方页面 ↗", destination: URL(string: "https://www.wclbox.com/games/1/PluginItem/26150")!)
+                    Button("检查最新版本", action: model.checkTaotaoCore).disabled(model.flavor != .time)
+                    Button("下载并预览安装", action: model.installTaotaoCore).disabled(model.taotaoRelease == nil || model.target == nil || model.flavor != .time)
+                }
+                Text("时光服全职业 WA 策略运行核心 · 来源：新手盒子 / 小桃桃 · 保留原职业 WA，安装前备份 AddOns").font(.caption).foregroundStyle(.secondary)
+                if let release = model.taotaoRelease, model.flavor == .time {
+                    Text("最新发布：" + release.file.file_display_name + "；本地 TOC：" + (model.addons.first { $0.folder == "TaotaoCore" }?.version ?? "未安装")).font(.caption).foregroundStyle(gold)
+                }
+                Text("安装后请在游戏内停用 VF_Core、VF_Interface、VF_HekiliFollower，保留职业策略。正式服暂无已核实的兼容发布。").font(.caption).foregroundStyle(.secondary)
+            }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            ddOnlineView
+        }
+    }
     private var ddOnlineView: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -561,7 +606,7 @@ struct ContentView: View {
     private var aboutView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Label("艾泽拉斯插件管家 · v0.11", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
+                Label("艾泽拉斯插件管家 · v0.12", systemImage: "puzzlepiece.extension").font(.title2.bold()).foregroundStyle(gold)
                 Text("仅通过网易 DD 官方扫描查询并直接下载更新，无需密钥。插件库按整包分组，可更新置顶、已是最新置底；支持一键更新全部，单包失败继续其他任务；在线页默认展示周热门，也可查看月热门与总下载排行。")
                 Divider()
                 Text("自动检查与一键更新").font(.headline)

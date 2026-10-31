@@ -218,3 +218,65 @@ public actor NewBeeClient {
         return result
     }
 }
+
+public struct NewBeePluginRelease: Sendable, Equatable {
+    public let name: String
+    public let file: NewBeePluginFile
+}
+public struct NewBeeCorePreview: Sendable {
+    public let installation: InstallPreview
+    public let release: NewBeePluginRelease
+    public let target: URL
+    public let originalFingerprint: String
+    public let payloadFingerprint: String
+}
+extension NewBeeClient {
+    /// Public author release; never infers paid access from its price or guesses a CDN filename.
+    public func taotaoCore(flavor: Flavor) async throws -> NewBeePluginRelease {
+        guard flavor == .time else { throw ManagerError("桃桃 Core 当前仅核实了时光服版本，请勿安装到正式服") }
+        struct Detail: Decodable {
+            struct Item: Decodable {
+                let id: Int; let name: String; let t_author_id: Int; let game_version_id: Int
+                let is_content_access: Bool; let file_list: [NewBeePluginFile]
+            }
+            let result: Item
+        }
+        let reply: NBEnvelope<Detail> = try await post("v3/mod/detail", ["mod_id": 26150, "game_version": 4])
+        guard reply.code == 1, let item = reply.data?.result, item.id == 26150, item.t_author_id == 657096,
+              item.game_version_id == 4, item.is_content_access,
+              let file = item.file_list.first(where: { $0.release_type == 1 }), file.file_folders == ["TaotaoCore"] else {
+            throw ManagerError("未取得可公开安装的桃桃 Core 正式发布文件，请到作者官方页面核对权限与版本")
+        }
+        _ = try file.downloadURL(pluginID: 26150)
+        return NewBeePluginRelease(name: item.name, file: file)
+    }
+    public func prepareTaotaoCore(_ expected: NewBeePluginRelease, target: URL, flavor: Flavor) async throws -> NewBeeCorePreview {
+        try FileSafety.validateTarget(target)
+        let original = try AddonFingerprint.fingerprint(target)
+        guard try await taotaoCore(flavor: flavor) == expected else { throw ManagerError("桃桃 Core 已更新，请重新检查版本") }
+        let archive = FileManager.default.temporaryDirectory.appendingPathComponent("AzerothCore-" + UUID().uuidString + ".zip")
+        defer { try? FileManager.default.removeItem(at: archive) }
+        try await downloadResource(expected.file.downloadURL(pluginID: 26150).absoluteString).write(to: archive, options: .atomic)
+        let library = Library()
+        let preview = try library.prepare(archive, target: target, flavor: flavor, newBeeCompatibility: true)
+        do {
+            guard preview.folders.map(\.lastPathComponent) == ["TaotaoCore"],
+                  try await taotaoCore(flavor: flavor) == expected,
+                  try AddonFingerprint.fingerprint(target) == original else { throw ManagerError("下载期间发布清单或本地插件发生变化，请重新预览") }
+            try Task.checkCancellation()
+            return NewBeeCorePreview(installation: preview, release: expected, target: target, originalFingerprint: original,
+                                     payloadFingerprint: try AddonFingerprint.fingerprint(preview.staging))
+        } catch { library.discard(preview); throw error }
+    }
+}
+public enum NewBeeCoreInstallation {
+    public static func install(_ preview: NewBeeCorePreview, library: Library = Library()) throws {
+        let root = preview.target.deletingLastPathComponent().deletingLastPathComponent()
+        guard try !ConfigurationLibrary().hasPendingTransaction(in: root),
+              try AddonFingerprint.fingerprint(preview.target) == preview.originalFingerprint,
+              try AddonFingerprint.fingerprint(preview.installation.staging) == preview.payloadFingerprint else {
+            throw ManagerError("预览后插件文件发生变化或存在未恢复的配置安装，请重新检查")
+        }
+        try library.install(preview.installation, target: preview.target)
+    }
+}
